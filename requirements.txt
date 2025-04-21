@@ -1,0 +1,6 @@
+aiogram==3.7.0
+python-dotenv
+sqlalchemy[asyncio]
+asyncpg
+openai>=1.0.0
+httpx
