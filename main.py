@@ -1,67 +1,76 @@
+
 import os
-import asyncio
 import logging
+import asyncio
 from datetime import datetime, timedelta
 
-from aiogram import Bot, Dispatcher, F
-from aiogram.enums import ParseMode
+from aiogram import Bot, Dispatcher, Router, F
+from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, BotCommand
 from aiogram.filters import Command
-from aiogram.types import (
-    Message,
-    InlineKeyboardMarkup,
-    InlineKeyboardButton,
-    BotCommand,
-)
-from aiogram.fsm.storage.memory import MemoryStorage
-from sqlalchemy import select
+from aiogram.fsm.storage.memory import MemoryStorage  # Используем память вместо Redis
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
 from dotenv import load_dotenv
 
 from models import Base, User
 from utils import check_user_subscription, is_user_allowed_to_chat
-from openai import AsyncOpenAI
-from aiogram.client.default import DefaultBotProperties
 
-# Загрузка .env
+# Загрузка переменных окружения
 load_dotenv()
+
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 DB_URL = os.getenv("DB_URL")
 ADMIN_IDS = os.getenv("ADMIN_IDS", "").split(",")
 
+# Настройка логирования
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# FSM-хранилище (внутреннее хранилище памяти)
 storage = MemoryStorage()
 logger.warning("⚠️ Redis не используется. Используется память.")
 
-bot = Bot(
-    token=BOT_TOKEN,
-    default=DefaultBotProperties(parse_mode=ParseMode.HTML),
-)
+# Инициализация бота
+bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=storage)
+router = Router()
+dp.include_router(router)
 
+# Устанавливаем default параметры для бота
+async def set_default_commands():
+    commands = [
+        BotCommand(command="start", description="Start the bot"),
+        BotCommand(command="help", description="Help"),
+        BotCommand(command="profile", description="User profile"),
+        BotCommand(command="subscription", description="Manage subscription"),
+        BotCommand(command="admin", description="Admin panel"),
+    ]
+    await bot.set_my_commands(commands)
+
+# Подключение к БД
 engine = create_async_engine(DB_URL, echo=False)
 Session = async_sessionmaker(engine, expire_on_commit=False)
 
-client = AsyncOpenAI(api_key=OPENAI_API_KEY)
-
+# Клавиатура подписки
 def get_subscription_kb():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="1 месяц — 299₽", callback_data="subscribe_1")],
-        [InlineKeyboardButton(text="3 месяца — 799₽", callback_data="subscribe_3")],
-        [InlineKeyboardButton(text="6 месяцев — 1499₽", callback_data="subscribe_6")],
-        [InlineKeyboardButton(text="12 месяцев — 2999₽", callback_data="subscribe_12")],
+    return InlineKeyboardMarkup(inline_keyboard=[ 
+        [InlineKeyboardButton(text="1 month — 299₽", callback_data="subscribe_1")],
+        [InlineKeyboardButton(text="3 months — 799₽", callback_data="subscribe_3")],
+        [InlineKeyboardButton(text="6 months — 1499₽", callback_data="subscribe_6")],
+        [InlineKeyboardButton(text="12 months — 2999₽", callback_data="subscribe_12")],
     ])
 
+# Главное меню
 def get_main_menu_kb():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📊 Мой статус", callback_data="my_status")],
-        [InlineKeyboardButton(text="💳 Подписка", callback_data="pay")],
+    return InlineKeyboardMarkup(inline_keyboard=[ 
+        [InlineKeyboardButton(text="📊 My status", callback_data="my_status")],
+        [InlineKeyboardButton(text="💳 Pay subscription", callback_data="pay")],
         [InlineKeyboardButton(text="❓ FAQ", callback_data="faq")],
     ])
 
-@dp.message(Command("start"))
+# Команда /start
+@router.message(Command("start"))
 async def handle_start(message: Message):
     async with Session() as session:
         user = await session.scalar(select(User).where(User.telegram_id == message.from_user.id))
@@ -75,97 +84,70 @@ async def handle_start(message: Message):
             await session.commit()
 
     text = (
-        "👋 <b>Добро пожаловать в АНОНИМНОГО ПСИХОЛОГА</b>! 🤖 Я использую <b>GPT-4</b> для платной подписки и <b>GPT-3.5</b> для бесплатного режима. 🫖 Просто напишите, как прошёл ваш день или что вас тревожит. 📌 Для начала вы можете использовать 3 бесплатных запроса каждый день. Подробнее — команда /help\n\n"
-        "🤖 Я использую GPT-4 (для подписчиков) и GPT-3.5 (в бесплатном режиме).\n"
-        "🫖 Просто напишите, как прошёл ваш день или что вас тревожит.\n"
-        "📌 У вас 3 бесплатных запроса каждый день.\n"
-        "ℹ️ Используйте /help для получения всех команд."
+        "👋 <b>Welcome to ANONYMOUS PSYCHOLOGIST</b>!  "
+        "🤖 I use <b>GPT-4</b> for paid subscriptions and <b>GPT-3.5</b> for the free version. "
+        "🫖 Just write about how your day went or what troubles you.  "
+        "📌 You can use 3 free queries each day. "
+        "For more info, use /help"
     )
-    await message.answer(text, reply_markup=get_main_menu_kb())
 
-@dp.message(Command("help"))
+    await message.answer(text, reply_markup=get_main_menu_kb())  # явное использование клавиатуры
+
+# Команда /help
+@router.message(Command("help"))
 async def handle_help(message: Message):
     await message.answer(
-        "<b>📘 Доступные команды:</b>\n"
-        "/start — Перезапуск и приветствие\n"
-        "/help — Описание команд\n"
-        "/profile — Проверка статуса подписки\n"
-        "/subscribe — Оформление подписки\n"
-        "/chat — Общение с ботом"
+        "📘 <b>How to use the bot</b>  "
+        "• Write about your condition, question, or emotions "
+        "• Receive an answer from AI (GPT-3.5 / GPT-4) "
+        "• You have 3 free queries per day  "
+        "🔐 Want more? Activate subscription via /subscription "
+        "🔎 The /profile command will show your status "
+        "📋 The /admin command is for admins only"
     )
 
-@dp.message(Command("profile"))
+# Команда /profile
+@router.message(Command("profile"))
 async def handle_profile(message: Message):
     async with Session() as session:
         user = await session.scalar(select(User).where(User.telegram_id == message.from_user.id))
         if not user:
-            await message.answer("Пользователь не найден.")
+            await message.answer("User not found.")
             return
 
         await check_user_subscription(user, session)
+
         if user.is_premium:
-            status = "✅ Активная подписка"
+            status = "✅ Active subscription"
         elif user.trial_started_at and (datetime.utcnow() - user.trial_started_at).days <= 3:
-            status = "🆓 Пробный период"
+            status = "🆓 Trial period"
         else:
-            status = "🔒 Доступ ограничен"
+            status = "🔒 Limited access"
 
         await message.answer(
-            f"📊 <b>Ваш статус:</b> {status}\n"
-            f"📅 Подписка до: {user.subscription_expires_at.strftime('%d.%m.%Y') if user.subscription_expires_at else '—'}"
+            f"📊 <b>Your status:</b> {status} 📅 Subscription until: {user.subscription_expires_at.strftime('%d.%m.%Y') if user.subscription_expires_at else '—'}"
         )
 
-@dp.message(Command("subscribe"))
+# Команда /subscription
+@router.message(Command("subscription"))
 async def handle_subscribe(message: Message):
-    await message.answer("💳 Выберите тариф:", reply_markup=get_subscription_kb())
+    await message.answer("💳 Choose a suitable plan:", reply_markup=get_subscription_kb())
 
-@dp.message(Command("chat"))
-async def handle_chat(message: Message):
-    async with Session() as session:
-        user = await session.scalar(select(User).where(User.telegram_id == message.from_user.id))
-        if not user:
-            await message.answer("Пожалуйста, введите /start")
-            return
+# Админ панель
+@router.message(Command("admin"))
+async def handle_admin(message: Message):
+    if str(message.from_user.id) not in ADMIN_IDS:
+        await message.answer("⛔ You don't have access.")
+        return
+    await message.answer("👨‍💼 Admin panel: Only basic functions are available for now.")
 
-        if not await is_user_allowed_to_chat(session, user):
-            await message.answer("🚫 Лимит запросов исчерпан. Активируйте подписку для безлимитного доступа.")
-            return
-
-        model = "gpt-4" if user.is_premium else "gpt-3.5-turbo"
-
-        try:
-            response = await client.chat.completions.create(
-                model=model,
-                messages=[{"role": "user", "content": message.text}],
-            )
-            reply = response.choices[0].message.content.strip()
-            await message.answer(reply)
-        except Exception as e:
-            logger.error(f"Ошибка при запросе к OpenAI: {e}")
-            await message.answer("⚠️ Ошибка при обращении к ИИ. Попробуйте позже.")
-
-        today = datetime.now().strftime("%Y-%m-%d")
-        if not hasattr(user, "daily_requests"):
-            user.daily_requests = {}
-        user.daily_requests[today] = user.daily_requests.get(today, 0) + 1
-        await session.commit()
-
-async def setup_bot_commands(bot: Bot):
-    commands = [
-        BotCommand(command="start", description="Перезапуск бота"),
-        BotCommand(command="help", description="Описание команд"),
-        BotCommand(command="profile", description="Ваш статус"),
-        BotCommand(command="subscribe", description="Оформить подписку"),
-        BotCommand(command="chat", description="Поговорить с ботом"),
-    ]
-    await bot.set_my_commands(commands)
-
+# Запуск
 async def main():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-        logger.info("✅ Таблицы БД инициализированы.")
-
-    await setup_bot_commands(bot)
+        logger.info("✅ Database tables initialized.")
+    
+    await set_default_commands()  # Устанавливаем команды
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
