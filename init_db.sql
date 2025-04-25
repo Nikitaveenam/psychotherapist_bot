@@ -1,9 +1,10 @@
-
 CREATE TABLE IF NOT EXISTS users (
     id SERIAL PRIMARY KEY,
     telegram_id BIGINT UNIQUE NOT NULL,
-    name TEXT NOT NULL,
+    name TEXT,
+    username TEXT,
     gender TEXT,
+    is_banned BOOLEAN DEFAULT FALSE,
     subscription_expires_at TIMESTAMP,
     trial_started_at TIMESTAMP,
     notifications_enabled BOOLEAN DEFAULT TRUE,

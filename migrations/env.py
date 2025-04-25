@@ -1,52 +1,47 @@
-import sys
 import os
+import sys
 from logging.config import fileConfig
 from sqlalchemy import engine_from_config, pool
 from alembic import context
-
-sys.path.append(os.path.abspath("."))
-
 from dotenv import load_dotenv
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
+# Загрузка .env
 load_dotenv()
 
-from main import Base
-
-# Alembic Config object
+# Конфигурация Alembic
 config = context.config
-
-# Считываем URL из переменной окружения и устанавливаем в конфиг Alembic
-config.set_main_option("sqlalchemy.url", os.getenv("DB_URL_SYNC"))
-
 fileConfig(config.config_file_name)
 
+# Устанавливаем URL БД из переменной окружения
+config.set_main_option("sqlalchemy.url", os.getenv("DB_URL_SYNC"))
+
+# Импорт моделей из твоего main.py
+from main import Base  # Base = declarative_base(metadata=...)
 target_metadata = Base.metadata
 
 def run_migrations_offline():
+    """Запуск в оффлайн-режиме (генерация SQL-скриптов)"""
     url = config.get_main_option("sqlalchemy.url")
     context.configure(
-        url=url,
-        target_metadata=target_metadata,
-        literal_binds=True,
-        dialect_opts={"paramstyle": "named"},
+        url=url, target_metadata=target_metadata, literal_binds=True, dialect_opts={"paramstyle": "named"}
     )
     with context.begin_transaction():
         context.run_migrations()
 
 def run_migrations_online():
+    """Запуск миграций в онлайн-режиме"""
     connectable = engine_from_config(
         config.get_section(config.config_ini_section),
         prefix="sqlalchemy.",
         poolclass=pool.NullPool,
     )
-
     with connectable.connect() as connection:
-        context.configure(
-            connection=connection,
-            target_metadata=target_metadata,
-        )
+        context.configure(connection=connection, target_metadata=target_metadata)
         with context.begin_transaction():
             context.run_migrations()
 
+# Определяем режим
 if context.is_offline_mode():
     run_migrations_offline()
 else:
