@@ -7,21 +7,32 @@ from sqlalchemy.orm import declarative_base
 from aiogram import Dispatcher
 from aiogram.types import ErrorEvent
 from aiogram.fsm.state import State, StatesGroup
+<<<<<<< HEAD
 from aiogram import
+=======
+from aiogram import F
+>>>>>>> 18fbeedce0645dd9c3f916acc311418f9ed1f0d6
 from aiogram.fsm.context import FSMContext
 from aiogram.filters import Command
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any, List
 from dotenv import load_dotenv
 from datetime import datetime, timedelta, timezone
+<<<<<<< HEAD
+=======
+from aiogram import Bot, Dispatcher, Router, F
+>>>>>>> 18fbeedce0645dd9c3f916acc311418f9ed1f0d6
 from aiogram.types import Message, BotCommand, CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.fsm.storage.memory import MemoryStorage
 from sqlalchemy import text, MetaData, Table, Column, Integer, String, Boolean, DateTime, BigInteger, Float
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 import httpx
 from decimal import Decimal, getcontext
+<<<<<<< HEAD
 from passlib.context import CryptContext
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+=======
+>>>>>>> 18fbeedce0645dd9c3f916acc311418f9ed1f0d6
 
 # --- Конфигурация ---
 load_dotenv()
@@ -483,6 +494,7 @@ async def get_user(telegram_id: int) -> Optional[Dict[str, Any]]:
             user = result.mappings().first()
             return dict(user) if user else None
     except Exception as e:
+<<<<<<< HEAD
         logger.error(f"Error in get_user for telegram_id {telegram_id}: {e}", exc_info=True)
         return None
 
@@ -522,27 +534,67 @@ async def get_user_message_history(user_id: int, days: int, page: int = 1, page_
 
 async def create_user(telegram_id: int, full_name: str, username: str = None, is_admin: bool = False):
     """Создание пользователя с дополнительной валидацией"""
+=======
+        logger.error(f"Error in get_user: {e}", exc_info=True)
+        return None
+
+async def get_user_by_username(username: str) -> Optional[Dict[str, Any]]:
+    """Получает пользователя по username"""
+    async with async_session() as session:
+        result = await session.execute(
+            text("SELECT * FROM users WHERE username = :username"),
+            {"username": username.replace('@', '')}
+        )
+        row = result.mappings().first()
+        return dict(row) if row else None
+
+async def create_user(telegram_id: int, full_name: str, username: str = None, 
+                     is_admin: bool = False, referred_by: int = None, 
+                     ip_address: int = None) -> Dict[str, Any]:
+    """Создает нового пользователя"""
+>>>>>>> 18fbeedce0645dd9c3f916acc311418f9ed1f0d6
     try:
         async with async_session() as session:
             # Проверяем текущий месяц
             current_month = datetime.now().month
+<<<<<<< HEAD
             referral_code = f"REF{random.randint(1000, 9999)}"
 
+=======
+            
+            referral_code = f"REF{random.randint(1000, 9999)}"
+>>>>>>> 18fbeedce0645dd9c3f916acc311418f9ed1f0d6
             user_data = {
                 "telegram_id": telegram_id,
                 "full_name": full_name,
                 "username": username,
                 "is_admin": is_admin,
                 "trial_started_at": datetime.utcnow() if not is_admin else None,
+<<<<<<< HEAD
                 "hearts": HEARTS_PER_DAY,
                 "created_at": datetime.utcnow(),
                 "referral_code": referral_code
             }
 
+=======
+                "hearts": HEARTS_PER_DAY + (REFERRAL_REWARD if referred_by else 0),
+                "last_request_date": datetime.utcnow(),
+                "referral_code": referral_code,
+                "referred_by": referred_by,
+                "ip_address": ip_address,
+                "referral_count": 0,
+                "last_referral_month": current_month,
+                "current_month_referrals": 0,
+                "created_at": datetime.utcnow()
+            }
+            
+            # Создание пользователя
+>>>>>>> 18fbeedce0645dd9c3f916acc311418f9ed1f0d6
             result = await session.execute(
                 users.insert().values(**user_data).returning(users)
             )
             await session.commit()
+<<<<<<< HEAD
 
             created_user = result.mappings().first()
             return dict(created_user)
@@ -551,6 +603,56 @@ async def create_user(telegram_id: int, full_name: str, username: str = None, is
         raise
 
 
+=======
+            
+            created_user = result.mappings().first()
+            if not created_user:
+                raise ValueError("User creation returned empty result")
+            
+            created_user_dict = dict(created_user)
+
+            # Обработка реферала (если есть)
+            if referred_by:
+                try:
+                    # Проверяем месяц последнего реферала у пригласившего
+                    referrer = await get_user(referred_by)
+                    if referrer:
+                        current_month = datetime.now().month
+                        if referrer['last_referral_month'] != current_month:
+                            # Сброс счетчика, если месяц изменился
+                            await update_user(
+                                referred_by,
+                                last_referral_month=current_month,
+                                current_month_referrals=0
+                            )
+                        
+                        # Проверяем лимит рефералов в текущем месяце
+                        if referrer['current_month_referrals'] < MAX_REFERRALS_PER_MONTH:
+                            # Обновляем данные пригласившего
+                            await update_user(
+                                referred_by,
+                                hearts=referrer.get('hearts', 0) + REFERRAL_REWARD,
+                                referral_count=referrer.get('referral_count', 0) + 1,
+                                current_month_referrals=referrer.get('current_month_referrals', 0) + 1
+                            )
+                            
+                            # Добавляем запись в рефералы
+                            await session.execute(
+                                referrals.insert().values(
+                                    referrer_id=referred_by,
+                                    referred_id=telegram_id,
+                                    created_at=datetime.utcnow()
+                                )
+                            )
+                            await session.commit()
+                            logger.info(f"Referral bonus applied for {referred_by}")
+                except Exception as ref_error:
+                    logger.error(f"Referral processing failed: {ref_error}")
+                    await session.rollback()
+
+            return created_user_dict
+            
+>>>>>>> 18fbeedce0645dd9c3f916acc311418f9ed1f0d6
     except Exception as e:
         logger.error(f"Critical error in create_user: {e}", exc_info=True)
         if 'session' in locals():
@@ -675,11 +777,16 @@ async def get_ai_response(prompt: str, user: Dict[str, Any]) -> str:
         )
         return response.choices[0].message.content
 
+<<<<<<< HEAD
 
     except httpx.RequestError as e:
         logger.error(f"Ошибка запроса к OpenAI: {e}")
     except Exception as e:
         logger.error(f"Неизвестная ошибка при запросе к OpenAI: {e}", exc_info=True)
+=======
+    except Exception as e:
+        logger.error(f"Ошибка OpenAI: {e}")
+>>>>>>> 18fbeedce0645dd9c3f916acc311418f9ed1f0d6
         return (
             "⚠️ <b>Произошла ошибка при обработке запроса</b>\n\n"
             "Попробуйте выполнить один из наших челленджей или вернитесь позже.\n\n"
@@ -770,6 +877,7 @@ async def get_user_messages(user_id: int, days: int = 1) -> List[Dict[str, Any]]
         )
         return [dict(row) for row in result.mappings()]
 
+<<<<<<< HEAD
 async def create_promotion(title: str, description: str, promo_code: str, discount_percent: int, hearts_reward: int,
                            start_date: datetime, end_date: datetime, tasks: str = None, reward_type: str = "hearts"):
     try:
@@ -821,6 +929,25 @@ async def create_promotion(title: str, description: str, promo_code: str, discou
         raise
 
 
+=======
+async def create_promotion(title: str, description: str, promo_code: str, discount_percent: int, hearts_reward: int, start_date: datetime, end_date: datetime, tasks: str = None, reward_type: str = "hearts"):
+    """Создает новую акцию"""
+    async with async_session() as session:
+        await session.execute(
+            promotions.insert().values(
+                title=title,
+                description=description,
+                promo_code=promo_code,
+                discount_percent=discount_percent,
+                hearts_reward=hearts_reward,
+                start_date=start_date,
+                end_date=end_date,
+                tasks=tasks,
+                reward_type=reward_type
+            )
+        )
+        await session.commit()
+>>>>>>> 18fbeedce0645dd9c3f916acc311418f9ed1f0d6
 
 async def get_promotions() -> List[Dict[str, Any]]:
     """Получает список активных акций"""
@@ -869,11 +996,18 @@ async def create_diary_entry(user_id: int, entry_text: str, mood: str = None):
 async def set_diary_password(user_id: int, password: str):
     """Устанавливает пароль на дневник"""
     async with async_session() as session:
+<<<<<<< HEAD
         hashed_password = pwd_context.hash(password)
         await session.execute(
             diary_entries.update()
             .where(diary_entries.c.user_id == user_id)
             .values(password=hashed_password)
+=======
+        await session.execute(
+            diary_entries.update()
+            .where(diary_entries.c.user_id == user_id)
+            .values(password=password)
+>>>>>>> 18fbeedce0645dd9c3f916acc311418f9ed1f0d6
         )
         await session.commit()
 
@@ -1477,6 +1611,7 @@ async def show_profile(callback: CallbackQuery):
         logger.error(f"Ошибка в обработчике профиля: {e}")
         await callback.answer("Произошла ошибка при загрузке профиля")
 
+<<<<<<< HEAD
 
 @router.callback_query(F.data == "list_promotions")
 async def list_promotions(callback: CallbackQuery):
@@ -1524,6 +1659,35 @@ async def list_promotions(callback: CallbackQuery):
             InlineKeyboardButton(text="🔙 Назад", callback_data="admin_promotions")
         ])
 
+=======
+@router.callback_query(F.data == "list_promotions")
+async def list_promotions(callback: CallbackQuery):
+    """Список активных акций"""
+    user = await get_user(callback.from_user.id)
+    if not user or not user.get('is_admin'):
+        return
+    
+    promotions_list = await get_promotions()
+    
+    if not promotions_list:
+        await callback.message.answer("🎁 Нет активных акций")
+    else:
+        text = "🎁 <b>Активные акции:</b>\n\n"
+        buttons = []
+        
+        for promo in promotions_list:
+            end_date = promo['end_date'].strftime("%d.%m.%Y")
+            text += f"• {promo['title']} (до {end_date})\nПромокод: {promo['promo_code']}\n\n"
+            buttons.append([
+                InlineKeyboardButton(
+                    text=f"Удалить {promo['promo_code']}",
+                    callback_data=f"delete_promo_{promo['id']}"
+                )
+            ])
+        
+        buttons.append([InlineKeyboardButton(text="🔙 Назад", callback_data="admin_promotions")])
+        
+>>>>>>> 18fbeedce0645dd9c3f916acc311418f9ed1f0d6
         await callback.message.edit_text(
             text,
             reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
@@ -1531,6 +1695,7 @@ async def list_promotions(callback: CallbackQuery):
         )
     await callback.answer()
 
+<<<<<<< HEAD
 
 @router.callback_query(F.data.startswith("delete_promo_"))
 async def delete_promotion(callback: CallbackQuery):
@@ -1555,6 +1720,8 @@ async def delete_promotion(callback: CallbackQuery):
         logger.error(f"Ошибка при удалении акции: {e}")
         await callback.answer("⚠️ Ошибка при удалении")
 
+=======
+>>>>>>> 18fbeedce0645dd9c3f916acc311418f9ed1f0d6
 @router.callback_query(F.data == "psychology_menu")
 async def psychology_menu(callback: CallbackQuery):
     """Меню психологического раздела"""
@@ -2013,6 +2180,7 @@ async def new_habit(callback: CallbackQuery):
     )
     await callback.answer()
 
+<<<<<<< HEAD
 class PromotionCreation(StatesGroup):
     waiting_for_title = State()
     waiting_for_description = State()
@@ -2023,6 +2191,8 @@ class PromotionCreation(StatesGroup):
     waiting_for_reward_type = State()
     waiting_for_tasks = State()
 
+=======
+>>>>>>> 18fbeedce0645dd9c3f916acc311418f9ed1f0d6
 class HabitCreation(StatesGroup):
     waiting_for_title = State()
     waiting_for_description = State()
@@ -2289,6 +2459,7 @@ async def admin_activate_premium(callback: CallbackQuery):
     await callback.message.edit_text("Введите @username пользователя для активации премиума:")
     await callback.answer()
 
+<<<<<<< HEAD
     @router.message(F.from_user.id == callback.from_user.id)
     async def activate_premium(message: Message):
         username = message.text.strip()
@@ -2304,11 +2475,14 @@ async def admin_activate_premium(callback: CallbackQuery):
             await callback.message.edit_text("Пользователь с таким username не найден.")
 
 
+=======
+>>>>>>> 18fbeedce0645dd9c3f916acc311418f9ed1f0d6
 @router.callback_query(F.data == "admin_hearts")
 async def admin_add_hearts(callback: CallbackQuery):
     await callback.message.edit_text("Введите @username и количество сердечек (пример: @user 100):")
     await callback.answer()
 
+<<<<<<< HEAD
     @router.message(F.from_user.id == callback.from_user.id)
     async def add_hearts(message: Message):
         parts = message.text.strip().split()
@@ -2384,12 +2558,19 @@ async def show_admin_stats(callback: CallbackQuery):
         await callback.message.edit_text(stats_message, parse_mode="HTML")
         await callback.answer()
 
+=======
+@router.callback_query(F.data == "admin_stats")
+async def admin_statistics(callback: CallbackQuery):
+    await callback.message.edit_text("📊 Админ-статистика (заглушка — здесь можно вывести аналитику)")
+    await callback.answer()
+>>>>>>> 18fbeedce0645dd9c3f916acc311418f9ed1f0d6
 
 @router.callback_query(F.data == "admin_user_messages")
 async def admin_user_history(callback: CallbackQuery):
     await callback.message.edit_text("Введите @username и количество дней (пример: @user 7):")
     await callback.answer()
 
+<<<<<<< HEAD
     @router.message(F.from_user.id == callback.from_user.id)
     async def get_user_history(message: Message):
         parts = message.text.strip().split()
@@ -2417,11 +2598,14 @@ async def admin_user_history(callback: CallbackQuery):
         else:
             await callback.message.edit_text("Пользователь с таким username не найден.")
 
+=======
+>>>>>>> 18fbeedce0645dd9c3f916acc311418f9ed1f0d6
 @router.callback_query(F.data == "admin_reset_activity")
 async def admin_reset_data(callback: CallbackQuery):
     await callback.message.edit_text("Введите @username для сброса активности:")
     await callback.answer()
 
+<<<<<<< HEAD
     @router.message(F.from_user.id == callback.from_user.id)
     async def reset_activity(message: Message):
         username = message.text.strip()  # Получаем username пользователя
@@ -2442,11 +2626,14 @@ async def admin_reset_data(callback: CallbackQuery):
         else:
             await callback.message.edit_text("Пользователь с таким username не найден.")
 
+=======
+>>>>>>> 18fbeedce0645dd9c3f916acc311418f9ed1f0d6
 @router.callback_query(F.data == "admin_ban")
 async def admin_ban_user(callback: CallbackQuery):
     await callback.message.edit_text("Введите @username пользователя, которого нужно заблокировать:")
     await callback.answer()
 
+<<<<<<< HEAD
     @router.message(F.from_user.id == callback.from_user.id)
     async def ban_user(message: Message):
         username = message.text.strip()
@@ -2463,10 +2650,16 @@ async def admin_ban_user(callback: CallbackQuery):
 @router.callback_query(F.data == "admin_promotions")
 async def admin_promotions_menu(callback: CallbackQuery):
     """Меню управления акциями"""
+=======
+@router.callback_query(F.data == "admin_promotions")
+async def admin_promotions(callback: CallbackQuery):
+    """Управление акциями"""
+>>>>>>> 18fbeedce0645dd9c3f916acc311418f9ed1f0d6
     user = await get_user(callback.from_user.id)
     if not user or not user.get('is_admin'):
         await callback.answer("Доступ запрещен")
         return
+<<<<<<< HEAD
 
     await callback.message.edit_text(
         "🎁 <b>Управление акциями</b>\n\n"
@@ -2481,10 +2674,24 @@ async def admin_promotions_menu(callback: CallbackQuery):
             [InlineKeyboardButton(text="🔙 В админ-панель", callback_data="admin_menu")]
         ]),
         parse_mode="HTML"
+=======
+    
+    await callback.message.edit_text(
+        "🎁 Управление акциями\n\n"
+        "1. Создать новую акцию\n"
+        "2. Просмотреть активные\n"
+        "3. Удалить акцию",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="➕ Создать акцию", callback_data="create_promotion")],
+            [InlineKeyboardButton(text="📋 Список акций", callback_data="list_promotions")],
+            [InlineKeyboardButton(text="🔙 Назад", callback_data="admin_menu")]
+        ])
+>>>>>>> 18fbeedce0645dd9c3f916acc311418f9ed1f0d6
     )
     await callback.answer()
 
 @router.callback_query(F.data == "create_promotion")
+<<<<<<< HEAD
 async def create_promotion_handler(callback: CallbackQuery, state: FSMContext):
     """Начало создания новой акции"""
     try:
@@ -2762,6 +2969,23 @@ async def process_tasks(message: Message, state: FSMContext):
 
     await state.clear()
 
+=======
+async def create_promotion_handler(callback: CallbackQuery):
+    """Создание акции"""
+    user = await get_user(callback.from_user.id)
+    if not user or not user.get('is_admin'):
+        await callback.answer("Доступ запрещен")
+        return
+    
+    await callback.message.edit_text(
+        "Введите данные акции в формате:\n\n"
+        "Название|Описание|Промокод|Скидка%|Награда в сердечках|Дата окончания (ДД.ММ.ГГГГ)\n\n"
+        "Пример:\n"
+        "Новогодняя акция|Специальное предложение|NEWYEAR2023|15|50|31.12.2023"
+    )
+    await callback.answer()
+
+>>>>>>> 18fbeedce0645dd9c3f916acc311418f9ed1f0d6
 @router.message(F.text & ~F.text.startswith('/'))
 async def handle_diary_password(message: Message):
     """Обработка пароля для дневника (исправленная версия)"""
