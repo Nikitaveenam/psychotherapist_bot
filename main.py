@@ -54,6 +54,7 @@ class UserStates(StatesGroup):
     waiting_for_gratitude = State()
     waiting_for_promo = State()
     waiting_for_task_completion = State()
+    waiting_for_sleep_data = State()
 
 class HabitCreation(StatesGroup):
     waiting_for_title = State()
@@ -64,6 +65,8 @@ class AdminStates(StatesGroup):
     creating_challenge = State()
     setting_rewards = State()
     waiting_for_premium_username = State()
+    waiting_for_ban_user = State()     
+    waiting_for_unban_user = State()
     waiting_for_hearts_data = State()
     waiting_for_ban_username = State()
     waiting_for_user_history = State()
@@ -405,6 +408,7 @@ users = Table(
     Column("trial_started_at", DateTime),
     Column("subscription_expires_at", DateTime),
     Column("created_at", DateTime, default=datetime.utcnow),
+    Column("last_activity_at", DateTime, default=datetime.utcnow),
     Column("is_banned", Boolean, default=False),
     Column("name", String(100), nullable=True),
     Column("diary_password", String(100), nullable=True),
@@ -514,6 +518,16 @@ promo_codes = Table(
 )
 
 # --- Helper functions ---
+def get_archetype_description(archetype: str) -> str:
+    """Возвращает описание архетипа"""
+    descriptions = {
+        'Герой': "Вы стремитесь доказать свою ценность через смелые поступки.",
+        'Опекун': "Вы заботитесь о других и защищаете слабых.",
+        'Мудрец': "Вы ищете истину и делитесь знаниями с миром.",
+        'Искатель': "Вы жаждете свободы и новых впечатлений."
+    }
+    return descriptions.get(archetype, "Неизвестный архетип")
+
 async def get_user(telegram_id: int) -> Optional[Dict[str, Any]]:
     """Get user from database"""
     try:
@@ -850,7 +864,42 @@ async def add_hearts(user_id: int, amount: int) -> bool:
         return False
     return await update_user(user_id, hearts=user.get('hearts', 0) + amount)
 
-# --- Keyboards ---
+# Клавиатуры
+def get_main_menu_keyboard(user_id: Optional[int] = None):
+    """Главное меню со всеми доступными функциями"""
+    buttons = [
+        # Основные функции
+        [InlineKeyboardButton(text="🧠 Психология", callback_data="psychology_menu"),
+         InlineKeyboardButton(text="📔 Дневник", callback_data="personal_diary")],
+        [InlineKeyboardButton(text="✅ Привычки", callback_data="habits"),
+        InlineKeyboardButton(text="📊 Прогресс", callback_data="progress")],
+        # Магазин и премиум
+        [InlineKeyboardButton(text="🛍 Магазин", callback_data="shop"),
+         InlineKeyboardButton(text="💎 Премиум", callback_data="premium_shop")],
+        # Дополнительно
+        [InlineKeyboardButton(text="👥 Рефералы", callback_data="referral_system"),
+         InlineKeyboardButton(text="ℹ️ Помощь", callback_data="help")]
+    ]
+    
+    buttons.append([InlineKeyboardButton(text="⚙️ Настройки", callback_data="settings")])
+        
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+def get_admin_keyboard():
+    """Полная клавиатура администратора"""
+    buttons = [
+        [InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats"),
+         InlineKeyboardButton(text="👥 Пользователи", callback_data="admin_users")],
+        [InlineKeyboardButton(text="💎 Выдать премиум", callback_data="admin_premium"),
+         InlineKeyboardButton(text="💖 Начислить сердца", callback_data="admin_hearts")],
+        [InlineKeyboardButton(text="🚫 Забанить", callback_data="admin_ban"),
+         InlineKeyboardButton(text="✅ Разбанить", callback_data="admin_unban")],
+        [InlineKeyboardButton(text="📝 Создать задание", callback_data="admin_create_task"),
+         InlineKeyboardButton(text="🎁 Создать промо", callback_data="admin_create_promo")],
+        [InlineKeyboardButton(text="🏠 В главное меню", callback_data="back_to_main")]
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
 def get_gender_keyboard():
     """Gender selection keyboard"""
     buttons = [
@@ -886,15 +935,6 @@ def get_premium_payment_keyboard(item_id: str):
         [InlineKeyboardButton(text="🟣 ЮMoney", callback_data=f"premium_yoomoney_{item_id}")],
         [InlineKeyboardButton(text="🎁 Ввести промокод", callback_data=f"premium_promo_{item_id}")],
         [InlineKeyboardButton(text="🔙 Назад", callback_data="premium_shop")]
-    ]
-    return InlineKeyboardMarkup(inline_keyboard=buttons)
-
-def get_main_menu_keyboard():
-    """Главное меню"""
-    buttons = [
-        [InlineKeyboardButton(text="👤 Профиль", callback_data="profile")],
-        [InlineKeyboardButton(text="🧠 Психология", callback_data="psychology_menu")],
-        [InlineKeyboardButton(text="🛍 Магазин", callback_data="shop")]
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
@@ -981,6 +1021,9 @@ def get_payment_methods_keyboard(item_id: str):
 async def cmd_start(message: Message, state: FSMContext):
     """Handle /start command with new onboarding flow"""
     try:
+        # Обновляем last_activity_at при каждом старте
+        await update_user(message.from_user.id, last_activity_at=datetime.utcnow())
+        
         loading_msg = await message.answer("🔄 Загрузка настроения...")
         
         # Check if user exists
@@ -1041,28 +1084,78 @@ async def process_user_name(message: Message, state: FSMContext):
     )
 
 async def show_main_menu(user_id: int, message: Message):
-    """Показывает главное меню"""
+    """Показывает главное меню с полным доступом ко всем функциям"""
     user = await get_user(user_id)
     if not user:
         await message.answer("Сначала используйте /start")
         return
 
     name = user.get('name', 'друг')
+    time_of_day = "доброе утро" if 5 <= datetime.now().hour < 12 else \
+                 "добрый день" if 12 <= datetime.now().hour < 18 else \
+                 "добрый вечер" if 18 <= datetime.now().hour < 23 else \
+                 "доброй ночи"
 
+    # Проверка бана
+    if user.get('is_banned'):
+        await message.answer(f"⛔ {name}, ваш аккаунт заблокирован.")
+        return
+
+    # Админ-панель
     if user.get('is_admin'):
+        # Получаем статистику для админа
+        async with async_session() as session:
+            total_users = (await session.execute(text("SELECT COUNT(*) FROM users"))).scalar()
+            active_today = (await session.execute(text(
+                "SELECT COUNT(*) FROM users WHERE created_at >= CURRENT_DATE"
+            ))).scalar()
+
+        admin_text = (
+            f"👑 {time_of_day.capitalize()}, {name} (Админ)\n\n"
+            f"📊 Пользователей: {total_users}\n"
+            f"🟢 Активных сегодня: {active_today}\n\n"
+            "Админ-панель:"
+        )
+
         await message.answer(
-            f"👑 Админ-панель, {name}",
+            admin_text,
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="👤 Активировать премиум", callback_data="admin_premium")],
-                [InlineKeyboardButton(text="💖 Начислить сердечки", callback_data="admin_hearts")],
-                [InlineKeyboardButton(text="🔙 В главное меню", callback_data="back_to_main")]
+                # Управление пользователями
+                [InlineKeyboardButton(text="👤 Найти пользователя", callback_data="admin_find_user"),
+                 InlineKeyboardButton(text="💎 Выдать премиум", callback_data="admin_premium")],
+                [InlineKeyboardButton(text="💖 Начислить сердца", callback_data="admin_hearts"),
+                 InlineKeyboardButton(text="🚫 Забанить", callback_data="admin_ban")],
+                # Управление контентом
+                [InlineKeyboardButton(text="📝 Создать задание", callback_data="admin_create_task"),
+                 InlineKeyboardButton(text="🎁 Создать промо", callback_data="admin_create_promo")],
+                # Аналитика
+                [InlineKeyboardButton(text="📊 Полная статистика", callback_data="admin_stats"),
+                 InlineKeyboardButton(text="📈 Аналитика", callback_data="admin_analytics")],
+                # Система
+                [InlineKeyboardButton(text="⚙️ Настройки", callback_data="admin_settings"),
+                 InlineKeyboardButton(text="📦 Бэкап данных", callback_data="admin_backup")],
+                [InlineKeyboardButton(text="🏠 Главное меню", callback_data="back_to_main")]
             ])
         )
-    else:
-        await message.answer(
-            f"Привет, {name}!\n\nВыберите раздел:",
-            reply_markup=get_main_menu_keyboard()
-        )
+        return
+
+    # Меню для обычного пользователя
+    account_status = await get_user_account_status(user_id)
+    status_icon = "💎" if account_status == "premium" else \
+                 "🟢" if account_status == "trial" else \
+                 "🔹"
+
+    main_menu_text = (
+        f"{time_of_day.capitalize()}, {name}! {status_icon}\n\n"
+        f"💖 Баланс: {user.get('hearts', 0)}\n"
+        f"📅 В системе с: {user['created_at'].strftime('%d.%m.%Y')}\n\n"
+        "Выберите раздел:"
+    )
+
+    await message.answer(
+        main_menu_text,
+        reply_markup=get_main_menu_keyboard(user_id)
+    )
         
 @router.callback_query(F.data.startswith("gender_"))
 async def process_gender(callback: CallbackQuery, state: FSMContext):
@@ -1859,7 +1952,54 @@ async def send_reminders():
 
         await asyncio.sleep(60)  # Проверка каждую минуту
         
-# --- Admin handlers ---
+# Админ обработкики
+@router.callback_query(F.data == "admin_stats")
+async def admin_stats(callback: CallbackQuery):
+    """Полная статистика бота"""
+    async with async_session() as session:
+        # Общая статистика
+        result = await session.execute(text("SELECT COUNT(*) FROM users"))
+        total_users = result.scalar()
+        
+        result = await session.execute(text("SELECT COUNT(*) FROM users WHERE is_premium = TRUE"))
+        premium_users = result.scalar()
+        
+        result = await session.execute(text("SELECT COUNT(*) FROM users WHERE is_banned = TRUE"))
+        banned_users = result.scalar()
+        
+        # Активность
+        result = await session.execute(text("""
+            SELECT COUNT(*) FROM users 
+            WHERE last_activity_at >= NOW() - INTERVAL '1 day'
+        """))
+        active_today = result.scalar()
+
+    text = (
+        "📊 <b>Полная статистика бота</b>\n\n"
+        f"👥 Всего пользователей: {total_users}\n"
+        f"💎 Премиум: {premium_users}\n"
+        f"🚫 Забанено: {banned_users}\n"
+        f"🟢 Активных за сутки: {active_today}\n"
+    )
+    
+    await callback.message.edit_text(text, parse_mode="HTML")
+    await callback.answer()
+
+@router.callback_query(F.data == "admin_users")
+async def admin_users(callback: CallbackQuery):
+    """Управление пользователями"""
+    await callback.message.edit_text(
+        "👥 <b>Управление пользователями</b>\n\n"
+        "Выберите действие:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔍 Поиск пользователя", callback_data="admin_find_user")],
+            [InlineKeyboardButton(text="📋 Последние регистрации", callback_data="admin_recent_users")],
+            [InlineKeyboardButton(text="🔙 Назад", callback_data="admin_panel")]
+        ]),
+        parse_mode="HTML"
+    )
+    await callback.answer()
+    
 @router.message(Command("admin"))
 async def admin_panel(message: Message):
     """Admin panel"""
@@ -1943,6 +2083,28 @@ async def admin_panel(message: Message):
         parse_mode="HTML"
     )
 
+@router.callback_query(F.data == "admin_ban")
+async def admin_ban_user(callback: CallbackQuery, state: FSMContext):
+    """Начало процесса бана пользователя"""
+    await callback.message.edit_text(
+        "🚫 <b>Бан пользователя</b>\n\n"
+        "Введите username или ID пользователя:",
+        parse_mode="HTML"
+    )
+    await state.set_state(AdminStates.waiting_for_ban_user)
+    await callback.answer()
+
+@router.callback_query(F.data == "admin_unban")
+async def admin_unban_user(callback: CallbackQuery, state: FSMContext):
+    """Начало процесса разбана пользователя"""
+    await callback.message.edit_text(
+        "✅ <b>Разбан пользователя</b>\n\n"
+        "Введите username или ID пользователя:",
+        parse_mode="HTML"
+    )
+    await state.set_state(AdminStates.waiting_for_unban_user)
+    await callback.answer()
+    
 @router.callback_query(F.data == "admin_confirm_payments")
 async def admin_confirm_payments(callback: CallbackQuery):
     """Show pending payments for confirmation"""
@@ -2207,6 +2369,115 @@ async def admin_premium_handler(callback: CallbackQuery, state: FSMContext):
     await state.set_state(AdminStates.waiting_for_premium_username)
     await callback.answer()
 
+@router.callback_query(F.data == "referral_system")
+async def show_referral_system(callback: CallbackQuery):
+    """Показывает реферальную систему"""
+    user = await get_user(callback.from_user.id)
+    if not user:
+        await callback.answer("Сначала используйте /start")
+        return
+
+    text = (
+        "👥 <b>Реферальная система</b>\n\n"
+        f"Ваш реферальный код: <code>{user['referral_code']}</code>\n\n"
+        "Приглашайте друзей и получайте:\n"
+        f"• {Config.REFERRAL_REWARD_HEARTS}💖 за каждого приглашенного\n"
+        f"• {Config.REFERRAL_REWARD_DAYS} дня премиума\n\n"
+        f"Максимум {Config.MAX_REFERRALS_PER_MONTH} приглашений в месяц.\n\n"
+        "Ваша ссылка для приглашений:\n"
+        f"https://t.me/{(await bot.get_me()).username}?start={user['referral_code']}"
+    )
+    
+    await callback.message.edit_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔙 Назад", callback_data="profile")]
+        ]),
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+@router.callback_query(F.data == "sleep_analyzer")
+async def sleep_analyzer_start(callback: CallbackQuery, state: FSMContext):
+    """Начало анализа сна"""
+    await callback.message.edit_text(
+        "🌙 <b>Анализ сна</b>\n\n"
+        "Ответьте на вопросы о вашем сне:\n\n"
+        "1. Во сколько вы легли спать?\n"
+        "2. Сколько часов спали?\n"
+        "3. Как оцениваете качество сна (1-10)?\n\n"
+        "Введите ответы через запятую (например: 23:00,7,6):",
+        parse_mode="HTML"
+    )
+    await state.set_state(UserStates.waiting_for_sleep_data)
+    await callback.answer()
+
+@router.message(StateFilter(UserStates.waiting_for_sleep_data))
+async def process_sleep_data(message: Message, state: FSMContext):
+    """Обработка данных о сне"""
+    try:
+        bedtime, hours, quality = message.text.strip().split(',')
+        hours = float(hours)
+        quality = int(quality)
+        
+        if not (0 < quality <= 10):
+            raise ValueError
+        
+        analysis = "Хороший сон" if quality >= 7 else "Плохой сон"
+        
+        await add_hearts(message.from_user.id, 25)
+        await message.answer(
+            f"🌙 <b>Результаты анализа:</b>\n\n"
+            f"• Время отхода ко сну: {bedtime}\n"
+            f"• Продолжительность: {hours} часов\n"
+            f"• Качество: {quality}/10\n\n"
+            f"<b>Вывод:</b> {analysis}\n\n"
+            "Рекомендации:\n"
+            "1. Старайтесь ложиться в одно время\n"
+            "2. Избегайте экранов перед сном",
+            reply_markup=get_psychology_menu_keyboard(),
+            parse_mode="HTML"
+        )
+        
+    except ValueError:
+        await message.answer("Неверный формат. Используйте: время,часы,качество (1-10)")
+        return
+    
+    await state.clear()
+    
+@router.message(StateFilter(UserStates.waiting_for_sleep_data))
+async def process_sleep_data(message: Message, state: FSMContext):
+    """Обработка данных о сне"""
+    try:
+        bedtime, hours, quality = message.text.strip().split(',')
+        hours = float(hours)
+        quality = int(quality)
+        
+        if not (0 < quality <= 10):
+            raise ValueError
+        
+        analysis = "Хороший сон" if quality >= 7 else "Плохой сон"
+        
+        await add_hearts(message.from_user.id, 25)
+        await message.answer(
+            f"🌙 <b>Результаты анализа:</b>\n\n"
+            f"• Время отхода ко сну: {bedtime}\n"
+            f"• Продолжительность: {hours} часов\n"
+            f"• Качество: {quality}/10\n\n"
+            f"<b>Вывод:</b> {analysis}\n\n"
+            "Рекомендации:\n"
+            "1. Старайтесь ложиться в одно время\n"
+            "2. Избегайте экранов перед сном",
+            reply_markup=get_psychology_menu_keyboard(),
+            parse_mode="HTML"
+        )
+        
+    except ValueError:
+        await message.answer("Неверный формат. Используйте: время,часы,качество (1-10)")
+        return
+    
+    await state.clear()
+    
 @router.message(StateFilter(AdminStates.waiting_for_premium_username))
 async def process_admin_premium(message: Message, state: FSMContext):
     """Process admin premium activation"""
@@ -2349,6 +2620,19 @@ async def check_subscriptions():
         # Run once per hour
         await asyncio.sleep(60 * 60)
 
+async def check_user_ban(user_id: int) -> bool:
+    """Проверяет, забанен ли пользователь"""
+    user = await get_user(user_id)
+    return user and user.get('is_banned', False)
+
+@router.message()
+async def check_banned_user(message: Message):
+    """Проверяет забаненных пользователей"""
+    if await check_user_ban(message.from_user.id):
+        await message.answer("🚫 Вы заблокированы в этом боте")
+        return
+    await message.answer("Используйте кнопки меню для навигации")
+    
 # --- Startup ---
 async def on_startup(dp: Dispatcher):
     """Bot startup actions"""
