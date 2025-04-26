@@ -41,6 +41,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+logging.getLogger('sqlalchemy.engine').setLevel(logging.WARNING)
+
 # Параметры
 TRIAL_DAYS = 3
 TRIAL_DAILY_LIMIT = 12
@@ -280,7 +282,7 @@ router = Router()
 dp.include_router(router)
 
 # Подключение к БД
-engine = create_async_engine(DB_URL, echo=True)
+engine = create_async_engine(DB_URL, echo=False)
 async_session = async_sessionmaker(engine, expire_on_commit=False)
 metadata = MetaData()
 Base = declarative_base(metadata=metadata)
@@ -459,17 +461,28 @@ reminders = Table(
     Column("is_active", Boolean, default=True)
 )
 
-
 # --- Вспомогательные функции ---
 async def setup_db():
-    """Создает таблицы при первом запуске"""
+    """Создает таблицы при первом запуске, если они не существуют"""
     try:
         async with engine.begin() as conn:
-            # Удаляем все таблицы, если они существуют
-            await conn.run_sync(metadata.drop_all)
-            # Создаем таблицы заново
-            await conn.run_sync(metadata.create_all)
-            logger.info("✅ Таблицы БД успешно пересозданы")
+            # Проверяем существование основной таблицы users
+            result = await conn.execute(
+                text("""
+                    SELECT EXISTS (
+                        SELECT FROM information_schema.tables 
+                        WHERE table_name = 'users'
+                    )
+                """)
+            )
+            table_exists = result.scalar()
+            
+            if not table_exists:
+                logger.info("🔄 Создание таблиц БД...")
+                await conn.run_sync(metadata.create_all)
+                logger.info("✅ Таблицы БД успешно созданы")
+            else:
+                logger.info("ℹ️ Таблицы БД уже существуют")
     except Exception as e:
         logger.critical(f"❌ Ошибка при создании таблиц: {e}")
         raise
@@ -1290,71 +1303,58 @@ def get_back_keyboard(callback_data: str):
 
 # --- Команды для пользователей ---
 @router.message(Command("start"))
-async def cmd_start(message: Message):
+async def cmd_start(message: Message, state: FSMContext):
     """Обработка команды /start"""
     try:
-        # Принудительно пересоздаем таблицы при старте
-        await setup_db()
-
         user = await get_user(message.from_user.id)
 
         if not user:
             is_admin = message.from_user.id in ADMIN_IDS
-            try:
-                user = await create_user(
-                    telegram_id=message.from_user.id,
-                    full_name=message.from_user.full_name,
-                    username=message.from_user.username,
-                    is_admin=is_admin
-                )
+            user = await create_user(
+                telegram_id=message.from_user.id,
+                full_name=message.from_user.full_name,
+                username=message.from_user.username,
+                is_admin=is_admin,
+                ip_address=message.from_user.id
+            )
 
-                if is_admin:
-                    await message.answer(
-                        "👑 Добро пожаловать, администратор!\n\n"
-                        "Используйте /admin для управления ботом")
-                    return
-
-                await message.answer("Добро пожаловать! Ваш профиль создан.")
-            except Exception as e:
-                logger.error(f"Ошибка при создании пользователя: {e}")
-                await message.answer("Произошла ошибка при создании профиля. Пожалуйста, попробуйте еще раз.")
+            if is_admin:
+                await message.answer(
+                    "👑 Добро пожаловать, администратор!\n\n"
+                    "Используйте /admin для управления ботом")
                 return
-    except Exception as e:
-        logger.error(f"Ошибка в обработчике /start: {e}", exc_info=True)
-        await message.answer("Произошла критическая ошибка. Пожалуйста, сообщите администратору.")
-        # Приветственное сообщение
-        welcome_msg = (
-            "🌸 <b>Добро пожаловать в психологический помощник!</b> 🌸\n\n"
-            "Я здесь, чтобы помочь тебе на пути к гармонии и душевному равновесию. "
-            "Вместе мы сможем:\n\n"
-            "• Разобраться в своих эмоциях и переживаниях 💭\n"
-            "• Научиться справляться со стрессом и тревогой 🌿\n"
-            "• Развить полезные привычки для ментального здоровья 🎯\n"
-            "• Вести личный дневник для самопознания 📔\n"
-            "• Практиковать медитации для расслабления 🧘‍♀️\n\n"
-            "Каждый день ты будешь получать сердечки 💖 за активность в боте, "
-            "которые можно обменять на полезные функции в магазине.\n\n"
-            "Давай начнем наш путь к гармонии вместе! Выбери раздел:"
-        )
 
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="👤 Мой профиль", callback_data="profile")],
-            [InlineKeyboardButton(text="🧠 Психология", callback_data="psychology_menu")],
-            [InlineKeyboardButton(text="💞 Реферальная система", callback_data="referral_system")],
-            [InlineKeyboardButton(text="🏆 Челленджи", callback_data="get_challenge")],
-            [InlineKeyboardButton(text="🛍 Магазин", callback_data="shop")]
-        ])
+            await state.set_state(UserStates.waiting_for_name)
+            await message.answer(
+                "🌿 Добро пожаловать в бота-психолога!\n\n"
+                "Как вас зовут? Введите ваше имя для персонализации:")
+            return
 
-        await message.answer(welcome_msg, reply_markup=keyboard, parse_mode="HTML")
-
-        # Если это новый пользователь, запрашиваем имя
-        if not user.get('name'):
-            await message.answer("Как тебя зовут? Напиши свое имя для персонализации:")
+        await show_main_menu(message.from_user.id, message)
 
     except Exception as e:
         logger.error(f"Ошибка в обработчике /start: {e}", exc_info=True)
         await message.answer("Произошла ошибка. Пожалуйста, попробуйте позже.")
 
+
+@router.message(Command("init_db"))
+async def cmd_init_db(message: Message):
+    """Команда для пересоздания БД (только для админов)"""
+    user = await get_user(message.from_user.id)
+    if not user or not user.get('is_admin'):
+        await message.answer("Доступ запрещен")
+        return
+    
+    try:
+        await message.answer("🔄 Начинаю пересоздание таблиц БД...")
+        async with engine.begin() as conn:
+            await conn.run_sync(metadata.drop_all)
+            await conn.run_sync(metadata.create_all)
+        await message.answer("✅ Таблицы БД успешно пересозданы")
+    except Exception as e:
+        logger.error(f"Ошибка при пересоздании БД: {e}")
+        await message.answer(f"❌ Ошибка: {str(e)}")
+        
 
 async def show_main_menu(user_id: int, message: Message):
     """Показывает главное меню с учетом прав пользователя"""
@@ -1541,7 +1541,11 @@ async def cmd_admin(message: Message):
         return
 
     await message.answer(
-        "👑 Админ-панель",
+        "👑 Админ-панель\n\n"
+        "Доступные команды:\n"
+        "/init_db - Пересоздать таблицы БД\n"
+        "/stats - Статистика бота\n"
+        "/broadcast - Рассылка сообщений",
         reply_markup=get_admin_keyboard()
     )
 
@@ -1959,7 +1963,7 @@ async def weekly_plan(callback: CallbackQuery):
 
 
 @router.errors()
-async def errors_handler(event: ErrorEvent):  # Для aiogram 3.x
+async def errors_handler(event: ErrorEvent):
     logger.error(f"Ошибка: {event.exception}")
     return True
 
@@ -2128,6 +2132,7 @@ class PromotionCreation(StatesGroup):
     waiting_for_reward_type = State()
     waiting_for_tasks = State()
 
+
 class AdminStates(StatesGroup):
     waiting_for_premium_username = State()
     waiting_for_hearts_data = State()
@@ -2135,11 +2140,13 @@ class AdminStates(StatesGroup):
     waiting_for_promotion_title = State()
     waiting_for_promotion_description = State()
     waiting_for_promotion_reward = State()
-
+    waiting_for_user_history = State()
+    
 class UserStates(StatesGroup):
     waiting_for_name = State()
     waiting_for_habit_title = State()
     waiting_for_habit_description = State()
+
 
 class Config:
     TRIAL_DAYS = 3
@@ -2151,6 +2158,7 @@ class Config:
     CHALLENGE_DURATION = 120
     REFERRAL_REWARD = 10
     MAX_REFERRALS_PER_MONTH = 5
+
 
 class HabitCreation(StatesGroup):
     waiting_for_title = State()
@@ -2390,9 +2398,6 @@ async def habits_progress(callback: CallbackQuery):
     )
     await callback.answer()
 
-
-# ... (код между функциями остается без изменений до функции meditations_menu)
-
 @router.callback_query(F.data == "meditations")
 async def meditations_menu(callback: CallbackQuery):
     """Меню медитаций с предупреждением о лимите"""
@@ -2439,9 +2444,6 @@ async def meditations_menu(callback: CallbackQuery):
     )
     await callback.answer()
 
-
-# ... (код между функциями остается без изменений до функции set_diary_password)
-
 @router.callback_query(F.data == "set_diary_password")
 async def set_diary_password_handler(callback: CallbackQuery):
     """Установка пароля на дневник (исправленная версия)"""
@@ -2457,105 +2459,129 @@ async def set_diary_password_handler(callback: CallbackQuery):
     )
     await callback.answer()
 
-
 @router.callback_query(F.data == "admin_premium")
-async def admin_activate_premium(callback: CallbackQuery, state: FSMContext):
-    """Активация премиума для пользователя"""
-    await callback.message.edit_text("Введите @username пользователя для активации премиума:")
+async def admin_premium_handler(callback: CallbackQuery, state: FSMContext):
+    await callback.message.edit_text("Введите @username для активации премиума:")
     await state.set_state(AdminStates.waiting_for_premium_username)
     await callback.answer()
 
-
-@router.message(F.text, StateFilter(AdminStates.waiting_for_premium_username))
+@router.message(StateFilter(AdminStates.waiting_for_premium_username))
 async def process_premium_username(message: Message, state: FSMContext):
-    """Обработка username для активации премиума"""
+    """Обработчик ввода username"""
     username = message.text.strip().replace("@", "")
     user = await get_user_by_username(username)
 
     if not user:
-        await message.answer("Пользователь не найден. Попробуйте еще раз:")
+        await message.answer("Пользователь не найден. Попробуйте ещё раз:")
         return
 
-    await update_user(user['telegram_id'],
-                      is_premium=True,
-                      subscription_expires_at=datetime.utcnow() + timedelta(days=30))
+    await update_user(
+        user['telegram_id'],
+        is_premium=True,
+        subscription_expires_at=datetime.utcnow() + timedelta(days=30)
+    )
     await message.answer(f"✅ Премиум активирован для @{username}")
     await bot.send_message(user['telegram_id'], "🎉 Вам был активирован премиум-доступ на 30 дней!")
     await state.clear()
 
-@router.message(F.from_user.id == callback.from_user.id)
-async def activate_premium(message: Message):
-        username = message.text.strip()
-        user = await get_user_by_username(username)  # Получаем пользователя по username
-        if user:
-            # Активация премиума
-            user.is_premium = True
-            await save_user(user)  # Сохраняем изменения в базе
-            # Уведомление пользователя
-            await bot.send_message(user.telegram_id, "Вам был активирован премиум статус!")
-            await callback.message.edit_text(f"Премиум статус был активирован для {username}.")
-        else:
-            await callback.message.edit_text("Пользователь с таким username не найден.")
-
+@router.message(AdminStates.waiting_for_premium_username)
+async def process_premium_activation(message: Message, state: FSMContext):
+    username = message.text.strip()
+    user = await get_user_by_username(username)
+    
+    if user:
+        await update_user(
+            user['telegram_id'],
+            is_premium=True,
+            subscription_expires_at=datetime.utcnow() + timedelta(days=30)
+        )
+        await message.answer(f"✅ Премиум активирован для @{username}")
+        await bot.send_message(user['telegram_id'], "🎉 Вам был активирован премиум-доступ на 30 дней!")
+    else:
+        await message.answer("❌ Пользователь не найден. Попробуйте еще раз:")
+    
+    await state.clear()
 
 @router.callback_query(F.data == "admin_hearts")
 async def admin_add_hearts(callback: CallbackQuery, state: FSMContext):
-    """Добавление сердечек пользователю"""
-    await callback.message.edit_text("Введите @username и количество сердечек через пробел (пример: username 100):")
+    await callback.message.edit_text(
+        "💖 Добавление сердечек\n\n"
+        "Введите @username и количество через пробел\n"
+        "Пример: @username 100"
+    )
     await state.set_state(AdminStates.waiting_for_hearts_data)
     await callback.answer()
 
-
-@router.message(F.text, StateFilter(AdminStates.waiting_for_hearts_data))
-async def process_hearts_data(message: Message, state: FSMContext):
-    """Обработка данных для добавления сердечек"""
+@router.message(F.text == "Баланас сердечек")
+async def show_hearts_balance(message: Message):
+    user = await get_user(message.from_user.id)
+    await message.answer(f"💰 Ваш баланс: {user.get('hearts', 0)} сердечек")
+    
+@router.message(StateFilter(AdminStates.waiting_for_hearts_data))
+async def handle_hearts_input(message: Message, state: FSMContext):
     try:
+        # Разделяем ввод на username и количество сердечек
         parts = message.text.strip().split()
         if len(parts) != 2:
             raise ValueError
-
+        
         username = parts[0].replace("@", "")
         hearts = int(parts[1])
-
+        
+        # Находим пользователя
         user = await get_user_by_username(username)
         if not user:
-            await message.answer("Пользователь не найден. Попробуйте еще раз:")
+            await message.answer("❌ Пользователь не найден")
+            return
+        
+        # Обновляем баланс
+        new_hearts = user.get('hearts', 0) + hearts
+        await update_user(user['telegram_id'], hearts=new_hearts)
+        
+        # Отправляем подтверждение
+        await message.answer(f"✅ Пользователю @{username} добавлено {hearts} сердечек")
+        await bot.send_message(
+            user['telegram_id'], 
+            f"🎉 Вам начислено {hearts} сердечек! Новый баланс: {new_hearts}"
+        )
+        
+    except ValueError:
+        await message.answer("❌ Неверный формат. Введите: @username количество")
+    finally:
+        await state.clear()
+
+@router.message(StateFilter(AdminStates.waiting_for_hearts_data))
+async def add_hearts(message: Message, state: FSMContext):
+    parts = message.text.strip().split()
+    if len(parts) != 2:
+        await message.answer("❌ Неверный формат. Введите: @username количество")
+        return
+
+    try:
+        username = parts[0].replace("@", "")
+        hearts = int(parts[1])
+        
+        user = await get_user_by_username(username)
+        if not user:
+            await message.answer("❌ Пользователь не найден")
             return
 
         new_hearts = user.get('hearts', 0) + hearts
         await update_user(user['telegram_id'], hearts=new_hearts)
+        
+        # Уведомление админа
         await message.answer(f"✅ Добавлено {hearts} сердечек пользователю @{username}")
-        await bot.send_message(user['telegram_id'],
-                               f"🎉 Вам было добавлено {hearts} сердечек! Теперь у вас {new_hearts} сердечек.")
+        
+        # Уведомление пользователя
+        await bot.send_message(
+            user['telegram_id'], 
+            f"🎉 Вам было добавлено {hearts} сердечек! Теперь у вас {new_hearts} сердечек."
+        )
+        
+    except ValueError:
+        await message.answer("❌ Введите корректное количество сердечек (целое число)")
+    finally:
         await state.clear()
-
-    except (ValueError, IndexError):
-        await message.answer("Неверный формат. Введите @username и количество сердечек через пробел:")
-
-@router.message(F.from_user.id == callback.from_user.id)
-async def add_hearts(message: Message):
-        parts = message.text.strip().split()
-        if len(parts) != 2:
-            await callback.message.edit_text("Неверный формат. Пример: @user 100")
-            return
-
-        username, hearts = parts
-        try:
-            hearts = int(hearts)
-        except ValueError:
-            await callback.message.edit_text("Введите корректное количество сердечек (целое число).")
-            return
-
-        user = await get_user_by_username(username)
-        if user:
-            user.hearts += hearts
-            await save_user(user)
-            # Уведомление пользователя
-            await bot.send_message(user.telegram_id, f"Вам было добавлено {hearts} сердечек!")
-            await callback.message.edit_text(f"{hearts} сердечек были добавлены пользователю {username}.")
-        else:
-            await callback.message.edit_text("Пользователь с таким username не найден.")
-
 
 @router.callback_query(F.data == "admin_stats")
 async def show_admin_stats(callback: CallbackQuery):
@@ -2608,7 +2634,6 @@ async def show_admin_stats(callback: CallbackQuery):
         await callback.message.edit_text(stats_message, parse_mode="HTML")
         await callback.answer()
 
-
 @router.callback_query(F.data == "admin_user_messages")
 async def admin_user_history(callback: CallbackQuery):
     await callback.message.edit_text("Введите @username и количество дней (пример: @user 7):")
@@ -2641,7 +2666,6 @@ async def admin_user_history(callback: CallbackQuery):
         else:
             await callback.message.edit_text("Пользователь с таким username не найден.")
 
-
 @router.callback_query(F.data == "admin_reset_activity")
 async def admin_reset_data(callback: CallbackQuery):
     await callback.message.edit_text("Введите @username для сброса активности:")
@@ -2667,7 +2691,6 @@ async def admin_reset_data(callback: CallbackQuery):
         else:
             await callback.message.edit_text("Пользователь с таким username не найден.")
 
-
 @router.callback_query(F.data == "admin_ban")
 async def admin_ban_user(callback: CallbackQuery):
     await callback.message.edit_text("Введите @username пользователя, которого нужно заблокировать:")
@@ -2685,7 +2708,6 @@ async def admin_ban_user(callback: CallbackQuery):
             await callback.message.edit_text(f"Пользователь {username} был заблокирован.")
         else:
             await callback.message.edit_text("Пользователь с таким username не найден.")
-
 
 @router.callback_query(F.data == "admin_promotions")
 async def admin_promotions_menu(callback: CallbackQuery):
@@ -2710,7 +2732,6 @@ async def admin_promotions_menu(callback: CallbackQuery):
         parse_mode="HTML"
     )
     await callback.answer()
-
 
 @router.callback_query(F.data == "create_promotion")
 async def create_promotion_handler(callback: CallbackQuery, state: FSMContext):
@@ -2811,7 +2832,6 @@ async def create_promotion_handler(callback: CallbackQuery, state: FSMContext):
         logger.error(f"Ошибка при создании акции: {e}")
         await callback.answer("Произошла ошибка при создании акции. Пожалуйста, попробуйте позже.")
 
-
 @router.message(PromotionCreation.waiting_for_title)
 async def process_promotion_title(message: Message, state: FSMContext):
     """Обработка названия акции"""
@@ -2825,7 +2845,6 @@ async def process_promotion_title(message: Message, state: FSMContext):
         "📝 Теперь введите описание акции (минимум 5 символов):\n"
         "(Что получат пользователи, условия и т.д.)"
     )
-
 
 @router.message(PromotionCreation.waiting_for_description)
 async def process_promotion_description(message: Message, state: FSMContext):
@@ -3025,8 +3044,6 @@ async def handle_diary_password(message: Message):
         await message.answer("⚠️ Произошла ошибка при установке пароля. Попробуйте позже.")
 
 
-# ... (код между функциями остается без изменений до функции create_diary_entry)
-
 async def create_diary_entry(user_id: int, entry_text: str, mood: str = None):
     """Создание записи в дневнике (исправленная версия)"""
     try:
@@ -3052,8 +3069,6 @@ async def create_diary_entry(user_id: int, entry_text: str, mood: str = None):
 
     return False
 
-
-# ... (код между функциями остается без изменений до функции get_diary_entries)
 
 async def get_diary_entries(user_id: int, period: str = "all") -> List[Dict[str, Any]]:
     """Получение записей дневника за указанный период (исправленная версия)"""
@@ -3081,10 +3096,6 @@ async def get_diary_entries(user_id: int, period: str = "all") -> List[Dict[str,
         return []
 
 
-# ... (остальной код остается без изменений)
-
-# --- ДОБАВЛЕНО: weekly_plans таблица ---
-
 weekly_plans = Table(
     "weekly_plans",
     metadata,
@@ -3095,8 +3106,6 @@ weekly_plans = Table(
     Column("week_start", DateTime)
 )
 
-
-# --- ДОБАВЛЕНО: weekly_plan функции ---
 
 async def get_weekly_plan(user_id: int) -> Optional[Dict[str, Any]]:
     async with async_session() as session:
@@ -3315,7 +3324,7 @@ async def cmd_start(message: Message, state: FSMContext):
         await message.answer("Произошла ошибка. Пожалуйста, попробуйте позже.")
 
 
-@router.message(F.text, StateFilter(UserStates.waiting_for_name))
+@router.message(StateFilter(UserStates.waiting_for_name))
 async def process_user_name(message: Message, state: FSMContext):
     """Обработка ввода имени пользователя"""
     name = message.text.strip()
@@ -3330,8 +3339,16 @@ async def process_user_name(message: Message, state: FSMContext):
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="🧠 Психология", callback_data="psychology_menu")],
             [InlineKeyboardButton(text="👤 Профиль", callback_data="profile")]
-        )
+        ])
     )
+
+
+@router.message()
+async def handle_unprocessed_messages(message: Message):
+    """Обработчик для всех необработанных сообщений"""
+    logger.warning(f"Необработанное сообщение: {message.text}")
+    await message.answer("Пожалуйста, используйте кнопки меню для взаимодействия с ботом.")
+    
 
 @router.message(F.text & ~F.command)
 async def handle_text_message(message: Message):
@@ -3354,12 +3371,13 @@ async def handle_text_message(message: Message):
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="🧠 Психология", callback_data="psychology_menu")],
                 [InlineKeyboardButton(text="👤 Профиль", callback_data="profile")]
-            )
+            ])
         )
         return
 
     # Обработка других текстовых сообщений
     await message.answer("Я не понимаю текстовые сообщения. Используйте кнопки меню.")
+
 
 async def show_main_menu(user_id: int, message: Message):
     """Показывает главное меню с учетом прав пользователя"""
