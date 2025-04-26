@@ -2123,6 +2123,7 @@ async def new_habit(callback: CallbackQuery):
 
 
 class PromotionCreation(StatesGroup):
+    waiting_for_name = State()
     waiting_for_title = State()
     waiting_for_description = State()
     waiting_for_promo_code = State()
@@ -2461,7 +2462,12 @@ async def set_diary_password_handler(callback: CallbackQuery):
 
 @router.callback_query(F.data == "admin_premium")
 async def admin_premium_handler(callback: CallbackQuery, state: FSMContext):
-    await callback.message.edit_text("Введите @username для активации премиума:")
+    """Обработчик активации премиума"""
+    await callback.message.edit_text(
+        "💎 <b>Активация премиум-доступа</b>\n\n"
+        "Введите @username пользователя для активации премиума:",
+        parse_mode="HTML"
+    )
     await state.set_state(AdminStates.waiting_for_premium_username)
     await callback.answer()
 
@@ -2484,30 +2490,61 @@ async def process_premium_username(message: Message, state: FSMContext):
     await bot.send_message(user['telegram_id'], "🎉 Вам был активирован премиум-доступ на 30 дней!")
     await state.clear()
 
-@router.message(AdminStates.waiting_for_premium_username)
+@router.message(StateFilter(AdminStates.waiting_for_premium_username))
 async def process_premium_activation(message: Message, state: FSMContext):
-    username = message.text.strip()
-    user = await get_user_by_username(username)
+    """Активация премиума для пользователя"""
+    username = message.text.strip().replace("@", "")
+    if not username:
+        await message.answer("❌ Неверный формат. Введите @username:")
+        return
     
-    if user:
+    try:
+        user = await get_user_by_username(username)
+        if not user:
+            await message.answer("❌ Пользователь не найден. Попробуйте еще раз:")
+            return
+        
+        # Активируем премиум на 30 дней
+        expires_at = datetime.utcnow() + timedelta(days=30)
         await update_user(
             user['telegram_id'],
             is_premium=True,
-            subscription_expires_at=datetime.utcnow() + timedelta(days=30)
+            subscription_expires_at=expires_at
         )
-        await message.answer(f"✅ Премиум активирован для @{username}")
-        await bot.send_message(user['telegram_id'], "🎉 Вам был активирован премиум-доступ на 30 дней!")
-    else:
-        await message.answer("❌ Пользователь не найден. Попробуйте еще раз:")
-    
-    await state.clear()
+        
+        # Уведомляем админа
+        await message.answer(
+            f"✅ Премиум успешно активирован для @{username} до {expires_at.strftime('%d.%m.%Y')}"
+        )
+        
+        # Уведомляем пользователя
+        try:
+            await bot.send_message(
+                user['telegram_id'],
+                "🎉 Вам был активирован премиум-доступ на 30 дней!\n\n"
+                "Теперь вам доступны:\n"
+                "- Неограниченные запросы к ИИ\n"
+                "- Приоритетная поддержка\n"
+                "- Дополнительные функции"
+            )
+        except Exception as e:
+            logger.error(f"Не удалось уведомить пользователя: {e}")
+            
+    except Exception as e:
+        logger.error(f"Ошибка активации премиума: {e}")
+        await message.answer("❌ Произошла ошибка. Попробуйте позже.")
+    finally:
+        await state.clear()
 
 @router.callback_query(F.data == "admin_hearts")
 async def admin_add_hearts(callback: CallbackQuery, state: FSMContext):
+    """Обработчик добавления сердечек"""
     await callback.message.edit_text(
-        "💖 Добавление сердечек\n\n"
-        "Введите @username и количество через пробел\n"
-        "Пример: @username 100"
+        "💖 <b>Добавление сердечек</b>\n\n"
+        "Введите в формате:\n"
+        "<code>@username количество</code>\n\n"
+        "Пример: <code>@ivanov 100</code>",
+        parse_mode="HTML"
     )
     await state.set_state(AdminStates.waiting_for_hearts_data)
     await callback.answer()
@@ -2518,35 +2555,47 @@ async def show_hearts_balance(message: Message):
     await message.answer(f"💰 Ваш баланс: {user.get('hearts', 0)} сердечек")
     
 @router.message(StateFilter(AdminStates.waiting_for_hearts_data))
-async def handle_hearts_input(message: Message, state: FSMContext):
+async def process_hearts_addition(message: Message, state: FSMContext):
+    """Добавление сердечек пользователю"""
     try:
-        # Разделяем ввод на username и количество сердечек
         parts = message.text.strip().split()
         if len(parts) != 2:
-            raise ValueError
-        
+            raise ValueError("Неверный формат")
+            
         username = parts[0].replace("@", "")
         hearts = int(parts[1])
         
-        # Находим пользователя
+        if hearts <= 0:
+            raise ValueError("Количество должно быть положительным")
+            
         user = await get_user_by_username(username)
         if not user:
             await message.answer("❌ Пользователь не найден")
             return
+            
+        new_balance = user.get('hearts', 0) + hearts
+        await update_user(user['telegram_id'], hearts=new_balance)
         
-        # Обновляем баланс
-        new_hearts = user.get('hearts', 0) + hearts
-        await update_user(user['telegram_id'], hearts=new_hearts)
-        
-        # Отправляем подтверждение
-        await message.answer(f"✅ Пользователю @{username} добавлено {hearts} сердечек")
-        await bot.send_message(
-            user['telegram_id'], 
-            f"🎉 Вам начислено {hearts} сердечек! Новый баланс: {new_hearts}"
+        # Уведомление админа
+        await message.answer(
+            f"✅ @{username} получил {hearts}💖. Новый баланс: {new_balance}💖"
         )
         
-    except ValueError:
-        await message.answer("❌ Неверный формат. Введите: @username количество")
+        # Уведомление пользователя
+        try:
+            await bot.send_message(
+                user['telegram_id'],
+                f"🎉 Вам начислено {hearts} сердечек!\n\n"
+                f"💖 Новый баланс: {new_balance}"
+            )
+        except Exception as e:
+            logger.error(f"Не удалось уведомить пользователя: {e}")
+            
+    except ValueError as e:
+        await message.answer(f"❌ Ошибка: {e}\n\nВведите в формате: @username количество")
+    except Exception as e:
+        logger.error(f"Ошибка добавления сердечек: {e}")
+        await message.answer("❌ Произошла ошибка. Попробуйте позже.")
     finally:
         await state.clear()
 
@@ -2585,129 +2634,202 @@ async def add_hearts(message: Message, state: FSMContext):
 
 @router.callback_query(F.data == "admin_stats")
 async def show_admin_stats(callback: CallbackQuery):
-    """Показывает подробную статистику для админа"""
-    user = await get_user(callback.from_user.id)
-    if not user or not user.get('is_admin'):
-        await callback.answer("Доступ запрещен")
-        return
-
-    async with async_session() as session:
-        # Количество пользователей
-        result = await session.execute(text("SELECT COUNT(*) FROM users"))
-        total_users = result.scalar()
-
-        # Количество активных пользователей
-        result = await session.execute(
-            text(
-                "SELECT COUNT(*) FROM users WHERE is_banned = FALSE AND (is_premium = TRUE OR trial_started_at IS NOT NULL)")
-        )
-        active_users = result.scalar()
-
-        # Количество завершённых челленджей
-        result = await session.execute(text("SELECT COUNT(*) FROM users WHERE completed_challenges > 0"))
-        challenges_completed = result.scalar()
-
-        # Количество использованных сердечек
-        result = await session.execute(text("SELECT SUM(hearts) FROM users"))
-        total_hearts = result.scalar() or 0
-
-        # Количество записей в дневнике
-        result = await session.execute(text("SELECT COUNT(*) FROM diary_entries"))
-        total_diary_entries = result.scalar()
-
-        # Количество выполненных привычек
-        result = await session.execute(text("SELECT COUNT(*) FROM habit_completions"))
-        total_habits_completed = result.scalar()
-
-        # Формируем сообщение статистики
-        stats_message = (
-            f"📊 <b>Подробная статистика</b>\n\n"
-            f"👥 <b>Общее количество пользователей:</b> {total_users}\n"
-            f"💬 <b>Активных пользователей:</b> {active_users}\n"
-            f"🏆 <b>Завершённых челленджей:</b> {challenges_completed}\n"
-            f"💖 <b>Общее количество сердечек использовано:</b> {total_hearts}\n"
-            f"📔 <b>Записей в дневнике:</b> {total_diary_entries}\n"
-            f"✅ <b>Привычек выполнено:</b> {total_habits_completed}\n"
-        )
-
-        # Отправляем статистику администратору
-        await callback.message.edit_text(stats_message, parse_mode="HTML")
+    """Показывает статистику для админа"""
+    try:
+        async with async_session() as session:
+            # Общая статистика
+            total_users = await session.scalar(text("SELECT COUNT(*) FROM users"))
+            premium_users = await session.scalar(text("SELECT COUNT(*) FROM users WHERE is_premium = TRUE"))
+            trial_users = await session.scalar(text("SELECT COUNT(*) FROM users WHERE trial_started_at IS NOT NULL AND is_premium = FALSE"))
+            
+            # Последние зарегистрированные пользователи
+            recent_users = await session.execute(
+                text("SELECT username, created_at FROM users ORDER BY created_at DESC LIMIT 10")
+            )
+            recent_users_list = [f"@{row.username} ({row.created_at.strftime('%d.%m')})" for row in recent_users]
+            
+            stats_message = (
+                "📊 <b>Статистика бота</b>\n\n"
+                f"👥 <b>Пользователи:</b>\n"
+                f"• Всего: {total_users}\n"
+                f"• Премиум: {premium_users}\n"
+                f"• На пробном периоде: {trial_users}\n\n"
+                f"🆕 <b>Последние регистрации:</b>\n" + 
+                "\n".join(recent_users_list)
+            )
+            
+            await callback.message.edit_text(stats_message, parse_mode="HTML")
+            
+    except Exception as e:
+        logger.error(f"Ошибка получения статистики: {e}")
+        await callback.message.edit_text("❌ Не удалось получить статистику")
+    finally:
         await callback.answer()
 
 @router.callback_query(F.data == "admin_user_messages")
-async def admin_user_history(callback: CallbackQuery):
-    await callback.message.edit_text("Введите @username и количество дней (пример: @user 7):")
+async def admin_user_history(callback: CallbackQuery, state: FSMContext):
+    """Запрос истории сообщений пользователя"""
+    await callback.message.edit_text(
+        "📝 <b>История сообщений пользователя</b>\n\n"
+        "Введите @username пользователя:",
+        parse_mode="HTML"
+    )
+    await state.set_state(AdminStates.waiting_for_user_history)
     await callback.answer()
 
-    @router.message(F.from_user.id == callback.from_user.id)
-    async def get_user_history(message: Message):
-        parts = message.text.strip().split()
-        if len(parts) != 2:
-            await callback.message.edit_text("Неверный формат. Пример: @user 7")
+@router.message(StateFilter(AdminStates.waiting_for_user_history))
+async def process_user_history(message: Message, state: FSMContext):
+    """Показывает историю сообщений пользователя"""
+    username = message.text.strip().replace("@", "")
+    if not username:
+        await message.answer("❌ Введите @username:")
+        return
+    
+    try:
+        user = await get_user_by_username(username)
+        if not user:
+            await message.answer("❌ Пользователь не найден")
             return
-
-        username, days = parts
-        try:
-            days = int(days)
-        except ValueError:
-            await callback.message.edit_text("Введите корректное количество дней (целое число).")
-            return
-
-        user = await get_user_by_username(username)  # Получаем пользователя по username
-        if user:
-            # Получаем историю сообщений за последние N дней
-            history = await get_user_message_history(user.telegram_id, days)  # Функция для получения истории сообщений
-
-            if history:
-                history_text = "\n".join([f"Сообщение от {entry.timestamp}: {entry.text}" for entry in history])
-                await callback.message.edit_text(f"История сообщений за последние {days} дней:\n{history_text}")
-            else:
-                await callback.message.edit_text(f"Нет сообщений за последние {days} дней.")
-        else:
-            await callback.message.edit_text("Пользователь с таким username не найден.")
+            
+        # Получаем историю сообщений
+        async with async_session() as session:
+            # Сообщения ИИ
+            ai_messages = await session.execute(
+                text("""
+                    SELECT message_text, created_at 
+                    FROM user_messages 
+                    WHERE user_id = :user_id AND is_ai_response = TRUE
+                    ORDER BY created_at DESC 
+                    LIMIT 10
+                """),
+                {"user_id": user['telegram_id']}
+            )
+            
+            # Записи дневника
+            diary_entries = await session.execute(
+                text("""
+                    SELECT entry_text, created_at 
+                    FROM diary_entries 
+                    WHERE user_id = :user_id
+                    ORDER BY created_at DESC 
+                    LIMIT 5
+                """),
+                {"user_id": user['telegram_id']}
+            )
+            
+            # Формируем сообщение
+            history_text = (
+                f"📝 <b>История активности @{username}</b>\n\n"
+                "💬 <b>Последние запросы к ИИ:</b>\n"
+            )
+            
+            for msg in ai_messages:
+                history_text += f"• {msg.created_at.strftime('%d.%m %H:%M')}: {msg.message_text[:50]}...\n"
+                
+            history_text += "\n📔 <b>Последние записи в дневнике:</b>\n"
+            
+            for entry in diary_entries:
+                history_text += f"• {entry.created_at.strftime('%d.%m %H:%M')}: {entry.entry_text[:50]}...\n"
+                
+            await message.answer(history_text, parse_mode="HTML")
+            
+    except Exception as e:
+        logger.error(f"Ошибка получения истории: {e}")
+        await message.answer("❌ Не удалось получить историю")
+    finally:
+        await state.clear()
 
 @router.callback_query(F.data == "admin_reset_activity")
-async def admin_reset_data(callback: CallbackQuery):
-    await callback.message.edit_text("Введите @username для сброса активности:")
+async def admin_reset_activity(callback: CallbackQuery, state: FSMContext):
+    """Сброс активности пользователя"""
+    await callback.message.edit_text(
+        "🔄 <b>Сброс активности пользователя</b>\n\n"
+        "Введите @username пользователя:",
+        parse_mode="HTML"
+    )
+    await state.set_state(AdminStates.waiting_for_ban_username)
     await callback.answer()
 
-    @router.message(F.from_user.id == callback.from_user.id)
-    async def reset_activity(message: Message):
-        username = message.text.strip()  # Получаем username пользователя
-        user = await get_user_by_username(username)  # Получаем пользователя по его username
-
-        if user:
-            # Сбрасываем активность пользователя
-            user.completed_challenges = 0  # Пример: сброс количества завершённых челленджей
-            user.diary_entries = 0  # Пример: сброс количества записей в дневнике
-            user.completed_habits = 0  # Пример: сброс выполнения привычек
-            await save_user(user)  # Сохраняем изменения в базе данных
-
-            # Уведомление пользователю о сбросе активности
-            await bot.send_message(user.telegram_id, "Ваша активность была сброшена администратором.")
-
-            # Подтверждение администратору
-            await callback.message.edit_text(f"Активность пользователя {username} была сброшена.")
-        else:
-            await callback.message.edit_text("Пользователь с таким username не найден.")
+@router.message(StateFilter(AdminStates.waiting_for_ban_username))
+async def process_reset_activity(message: Message, state: FSMContext):
+    """Обработка сброса активности"""
+    username = message.text.strip().replace("@", "")
+    if not username:
+        await message.answer("❌ Введите @username:")
+        return
+    
+    try:
+        user = await get_user_by_username(username)
+        if not user:
+            await message.answer("❌ Пользователь не найден")
+            return
+            
+        # Сбрасываем активность (но не подписку и сердечки)
+        await update_user(
+            user['telegram_id'],
+            completed_challenges=0,
+            total_requests=0,
+            last_challenge_time=None,
+            active_challenge=None,
+            challenge_started_at=None
+        )
+        
+        await message.answer(f"✅ Активность пользователя @{username} сброшена")
+        
+    except Exception as e:
+        logger.error(f"Ошибка сброса активности: {e}")
+        await message.answer("❌ Не удалось сбросить активность")
+    finally:
+        await state.clear()
 
 @router.callback_query(F.data == "admin_ban")
-async def admin_ban_user(callback: CallbackQuery):
-    await callback.message.edit_text("Введите @username пользователя, которого нужно заблокировать:")
+async def admin_ban_user(callback: CallbackQuery, state: FSMContext):
+    """Блокировка пользователя"""
+    await callback.message.edit_text(
+        "🚫 <b>Блокировка пользователя</b>\n\n"
+        "Введите @username пользователя:",
+        parse_mode="HTML"
+    )
+    await state.set_state(AdminStates.waiting_for_ban_username)
     await callback.answer()
 
-    @router.message(F.from_user.id == callback.from_user.id)
-    async def ban_user(message: Message):
-        username = message.text.strip()
+@router.message(StateFilter(AdminStates.waiting_for_ban_username))
+async def process_ban_user(message: Message, state: FSMContext):
+    """Обработка блокировки пользователя"""
+    username = message.text.strip().replace("@", "")
+    if not username:
+        await message.answer("❌ Введите @username:")
+        return
+    
+    try:
         user = await get_user_by_username(username)
-        if user:
-            user.is_banned = True
-            await save_user(user)
-            # Уведомление пользователю
-            await bot.send_message(user.telegram_id, "Ваш аккаунт был заблокирован.")
-            await callback.message.edit_text(f"Пользователь {username} был заблокирован.")
-        else:
-            await callback.message.edit_text("Пользователь с таким username не найден.")
+        if not user:
+            await message.answer("❌ Пользователь не найден")
+            return
+            
+        # Блокируем пользователя
+        await update_user(
+            user['telegram_id'],
+            is_banned=True
+        )
+        
+        await message.answer(f"✅ Пользователь @{username} заблокирован")
+        
+        # Уведомляем пользователя
+        try:
+            await bot.send_message(
+                user['telegram_id'],
+                "🚫 Ваш аккаунт был заблокирован администратором.\n\n"
+                "Если вы считаете это ошибкой, свяжитесь с поддержкой."
+            )
+        except Exception as e:
+            logger.error(f"Не удалось уведомить пользователя: {e}")
+            
+    except Exception as e:
+        logger.error(f"Ошибка блокировки пользователя: {e}")
+        await message.answer("❌ Не удалось заблокировать пользователя")
+    finally:
+        await state.clear()
 
 @router.callback_query(F.data == "admin_promotions")
 async def admin_promotions_menu(callback: CallbackQuery):
@@ -2735,138 +2857,216 @@ async def admin_promotions_menu(callback: CallbackQuery):
 
 @router.callback_query(F.data == "create_promotion")
 async def create_promotion_handler(callback: CallbackQuery, state: FSMContext):
-    """Начало создания новой акции"""
+    """Начало создания акции"""
+    await callback.message.edit_text(
+        "🎁 <b>Создание новой акции</b>\n\n"
+        "Введите название акции:",
+        parse_mode="HTML"
+    )
+    await state.set_state(PromotionCreation.waiting_for_title)
+    await callback.answer()
+
+# Обрабатываем введённое название
+@router.message()
+async def promotion_name_input(message: Message):
+    promotion_name = message.text.strip()
+
+    if len(promotion_name) < 3:
+        await message.answer("Название должно быть хотя бы из 3 символов. Попробуйте снова.")
+        return
+
+    # Запоминаем название и переходим к следующему шагу
+    promotion_data = {"name": promotion_name}
+    await ask_for_description(message, promotion_data)
+
+
+# Обрабатываем введённое описание
+@router.message()
+async def promotion_description_input(message: Message, state: FSMContext):
+    promotion_description = message.text.strip()
+
+    if len(promotion_description) < 5:
+        await message.answer("Описание должно быть хотя бы из 5 символов. Попробуйте снова.")
+        return
+
+    data = await state.get_data()
+    data['description'] = promotion_description
+    await state.update_data(description=promotion_description)
+
+    await ask_for_start_date(message, state)
+
+
+# Обрабатываем дату начала
+@router.message()
+async def promotion_start_date_input(message: Message, state: FSMContext):
     try:
-        user = await get_user(callback.from_user.id)
-        if not user or not user.get('is_admin'):
-            await callback.answer("Доступ запрещен")
-            return
+        start_date = datetime.strptime(message.text.strip(), "%Y-%m-%d")
+    except ValueError:
+        await message.answer("❗ Неверный формат даты. Введите дату в формате ГГГГ-ММ-ДД.")
+        return
 
-        await state.set_state(PromotionCreation.waiting_for_title)
-        await callback.message.edit_text(
-            "🎁 <b>Создание новой акции</b>\n\n"
-            "Введите название акции (минимум 3 символа):",
-            parse_mode="HTML"
-        )
-        await callback.answer()
-    except Exception as e:
-        logger.error(f"Ошибка при начале создания акции: {e}")
-        await callback.answer("Произошла ошибка. Пожалуйста, попробуйте позже.")
+    await state.update_data(start_date=start_date)
+    await ask_for_end_date(message, state)
 
-        # Обрабатываем введённое название
-        @router.message(F.from_user.id == callback.from_user.id)
-        async def promotion_name_input(message: Message):
-            promotion_name = message.text.strip()
 
-            if len(promotion_name) < 3:
-                await message.answer("Название должно быть хотя бы из 3 символов. Попробуйте снова.")
-                return
+# Обрабатываем дату окончания
+@router.message()
+async def promotion_end_date_input(message: Message, state: FSMContext):
+    try:
+        end_date = datetime.strptime(message.text.strip(), "%Y-%m-%d")
+    except ValueError:
+        await message.answer("❗ Неверный формат даты. Введите дату в формате ГГГГ-ММ-ДД.")
+        return
 
-            # Запоминаем название и переходим к следующему шагу
-            promotion_data = {"name": promotion_name}
-            await ask_for_description()
-            return promotion_data
+    # Получаем уже введенные данные (название, описание, стартовая дата)
+    data = await state.get_data()
+    data['end_date'] = end_date
 
-        # Обрабатываем введённое описание
-        @router.message(F.from_user.id == callback.from_user.id)
-        async def promotion_description_input(message: Message, promotion_data):
-            promotion_description = message.text.strip()
+    # Теперь создаем акцию в базе
+    await create_promotion_in_db(data)
 
-            if len(promotion_description) < 5:
-                await message.answer("Описание должно быть хотя бы из 5 символов. Попробуйте снова.")
-                return
+    await message.answer("✅ Акция успешно создана!")
 
-            promotion_data['description'] = promotion_description
-            await ask_for_start_date()
-            return promotion_data
 
-        # Обрабатываем дату начала
-        @router.message(F.from_user.id == callback.from_user.id)
-        async def promotion_start_date_input(message: Message, promotion_data):
-            try:
-                start_date = datetime.strptime(message.text, "%Y-%m-%d")
-            except ValueError:
-                await message.answer("Неверный формат даты. Попробуйте снова.")
-                return
+async def create_promotion_in_db(promotion_data):
+    """Создает акцию в базе данных"""
+    async with async_session() as session:
+        try:
+            await session.execute(
+                promotions.insert().values(
+                    title=promotion_data['name'],
+                    description=promotion_data['description'],
+                    promo_code=f"PROMO{random.randint(1000, 9999)}",
+                    discount_percent=0,  # По умолчанию без скидки
+                    hearts_reward=100,  # Сначала назначаем 100 сердечек
+                    start_date=promotion_data['start_date'],
+                    end_date=promotion_data['end_date'],
+                    created_at=datetime.utcnow()
+                )
+            )
+            await session.commit()
+            await message.answer(f"Акция '{promotion_data['name']}' успешно создана!")
+        except Exception as db_error:
+            logger.error(f"Ошибка при вставке в базу данных: {e}")
+            await session.rollback()
+            await callback.message.answer("Произошла ошибка при создании акции. Пожалуйста, попробуйте позже.")
 
-            promotion_data['start_date'] = start_date
-            await ask_for_end_date()
-            return promotion_data
-
-        # Обрабатываем дату окончания
-        @router.message(F.from_user.id == callback.from_user.id)
-        async def promotion_end_date_input(message: Message, promotion_data):
-            try:
-                end_date = datetime.strptime(message.text, "%Y-%m-%d")
-            except ValueError:
-                await message.answer("Неверный формат даты. Попробуйте снова.")
-                return
-
-            promotion_data['end_date'] = end_date
-            # Добавляем новую акцию в базу данных
-            await create_promotion_in_db(promotion_data)
-
-        async def create_promotion_in_db(promotion_data):
-            """Создает акцию в базе данных"""
-            async with async_session() as session:
-                try:
-                    await session.execute(
-                        promotions.insert().values(
-                            title=promotion_data['name'],
-                            description=promotion_data['description'],
-                            promo_code=f"PROMO{random.randint(1000, 9999)}",
-                            discount_percent=0,  # По умолчанию без скидки
-                            hearts_reward=100,  # Сначала назначаем 100 сердечек
-                            start_date=promotion_data['start_date'],
-                            end_date=promotion_data['end_date'],
-                            created_at=datetime.utcnow()
-                        )
-                    )
-                    await session.commit()
-                    await callback.message.answer(f"Акция '{promotion_data['name']}' успешно создана!")
-                except Exception as db_error:
-                    logger.error(f"Ошибка при вставке в базу данных: {db_error}")
-                    await session.rollback()
-                    await callback.message.answer("Произошла ошибка при создании акции. Пожалуйста, попробуйте позже.")
-    except Exception as e:
-        logger.error(f"Ошибка при создании акции: {e}")
-        await callback.answer("Произошла ошибка при создании акции. Пожалуйста, попробуйте позже.")
-
-@router.message(PromotionCreation.waiting_for_title)
+@router.message(StateFilter(PromotionCreation.waiting_for_title))
 async def process_promotion_title(message: Message, state: FSMContext):
     """Обработка названия акции"""
     if len(message.text.strip()) < 3:
-        await message.answer("⚠️ Название должно содержать минимум 3 символа. Попробуйте еще раз:")
+        await message.answer("❌ Название должно содержать минимум 3 символа. Попробуйте еще раз:")
         return
-
+        
     await state.update_data(title=message.text.strip())
     await state.set_state(PromotionCreation.waiting_for_description)
-    await message.answer(
-        "📝 Теперь введите описание акции (минимум 5 символов):\n"
-        "(Что получат пользователи, условия и т.д.)"
-    )
+    await message.answer("📝 Введите описание акции:")
 
-@router.message(PromotionCreation.waiting_for_description)
+@router.message(StateFilter(PromotionCreation.waiting_for_description))
 async def process_promotion_description(message: Message, state: FSMContext):
     """Обработка описания акции"""
-    if len(message.text.strip()) < 5:
-        await message.answer("⚠️ Описание должно содержать минимум 5 символа. Попробуйте еще раз:")
+    if len(message.text.strip()) < 10:
+        await message.answer("❌ Описание должно содержать минимум 10 символов. Попробуйте еще раз:")
         return
-
+        
     await state.update_data(description=message.text.strip())
     await state.set_state(PromotionCreation.waiting_for_reward_type)
-
+    
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="💖 Награда сердечками", callback_data="reward_hearts")],
-        [InlineKeyboardButton(text="💳 Скидка на подписку", callback_data="reward_discount")]
+        [InlineKeyboardButton(text="💖 Награда сердечками", callback_data="promo_reward_hearts")],
+        [InlineKeyboardButton(text="💳 Скидка на подписку", callback_data="promo_reward_discount")]
     ])
-
+    
     await message.answer(
         "🎁 Выберите тип награды:",
         reply_markup=keyboard
     )
 
 
+@router.callback_query(F.data.startswith("promo_reward_"))
+async def process_promotion_reward(callback: CallbackQuery, state: FSMContext):
+    """Обработка типа награды"""
+    reward_type = "hearts" if callback.data == "promo_reward_hearts" else "discount"
+    await state.update_data(reward_type=reward_type)
+    
+    if reward_type == "hearts":
+        await state.set_state(PromotionCreation.waiting_for_hearts)
+        await callback.message.edit_text("💖 Введите количество сердечек:")
+    else:
+        await state.set_state(PromotionCreation.waiting_for_discount)
+        await callback.message.edit_text("💳 Введите размер скидки (1-100%):")
+    
+    await callback.answer()
+    
+    
+@router.message(StateFilter(PromotionCreation.waiting_for_hearts))
+async def process_promotion_hearts(message: Message, state: FSMContext):
+    """Обработка количества сердечек"""
+    try:
+        hearts = int(message.text.strip())
+        if hearts <= 0:
+            raise ValueError
+            
+        await state.update_data(hearts_reward=hearts, discount_percent=0)
+        await finish_promotion_creation(message, state)
+        
+    except ValueError:
+        await message.answer("❌ Введите корректное число сердечек:")
+        
+        
+@router.message(StateFilter(PromotionCreation.waiting_for_discount))
+async def process_promotion_discount(message: Message, state: FSMContext):
+    """Обработка размера скидки"""
+    try:
+        discount = int(message.text.strip())
+        if not 1 <= discount <= 100:
+            raise ValueError
+            
+        await state.update_data(discount_percent=discount, hearts_reward=0)
+        await finish_promotion_creation(message, state)
+        
+    except ValueError:
+        await message.answer("❌ Введите корректный процент скидки (1-100):")
+
+async def finish_promotion_creation(message: Message, state: FSMContext):
+    """Завершение создания акции"""
+    try:
+        data = await state.get_data()
+        promo_code = f"PROMO{random.randint(1000, 9999)}"
+        
+        await create_promotion(
+            title=data['title'],
+            description=data['description'],
+            promo_code=promo_code,
+            discount_percent=data.get('discount_percent', 0),
+            hearts_reward=data.get('hearts_reward', 0),
+            start_date=datetime.utcnow(),
+            end_date=datetime.utcnow() + timedelta(days=30),
+            reward_type=data['reward_type']
+        )
+        
+        reward_text = ""
+        if data['reward_type'] == "hearts":
+            reward_text = f"💖 Награда: {data['hearts_reward']} сердечек"
+        else:
+            reward_text = f"💳 Скидка: {data['discount_percent']}%"
+            
+        await message.answer(
+            f"🎉 <b>Акция создана!</b>\n\n"
+            f"Название: {data['title']}\n"
+            f"Промокод: <code>{promo_code}</code>\n"
+            f"{reward_text}\n"
+            f"Действует до: {(datetime.utcnow() + timedelta(days=30)).strftime('%d.%m.%Y')}",
+            parse_mode="HTML"
+        )
+        
+    except Exception as e:
+        logger.error(f"Ошибка создания акции: {e}")
+        await message.answer("❌ Не удалось создать акцию")
+    finally:
+        await state.clear()
+        
+        
 @router.message(PromotionCreation.waiting_for_promo_code)
 async def process_promo_code(message: Message, state: FSMContext):
     """Обработка промокода"""
