@@ -2,27 +2,24 @@ import os
 import logging
 import asyncio
 import random
-from sqlalchemy import MetaData
-from sqlalchemy.orm import declarative_base
-from aiogram import Dispatcher
-from aiogram.types import ErrorEvent
-from aiogram.fsm.state import State, StatesGroup
-from aiogram import F
-from aiogram.fsm.context import FSMContext
-from aiogram.filters import Command
-from datetime import datetime, timedelta
-from typing import Optional, Dict, Any, List
+import httpx
+
 from dotenv import load_dotenv
+from typing import Optional, Dict, Any, List
+from decimal import Decimal, getcontext
 from datetime import datetime, timedelta, timezone
+
 from aiogram import Bot, Dispatcher, Router, F
-from aiogram.types import Message, BotCommand, CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import ErrorEvent, Message, BotCommand, CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.filters import Command, StateFilter
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
+
 from sqlalchemy import text, MetaData, Table, Column, Integer, String, Boolean, DateTime, BigInteger, Float
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
-import httpx
-from decimal import Decimal, getcontext
-from aiogram.filters.state import State, StatesGroup
-from aiogram.filters import StateFilter
+from sqlalchemy.orm import declarative_base
+
 
 # --- Конфигурация ---
 load_dotenv()
@@ -41,6 +38,82 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+
+class PromotionCreation(StatesGroup):
+    waiting_for_name = State()
+    waiting_for_title = State()
+    waiting_for_description = State()
+    waiting_for_promo_code = State()
+    waiting_for_discount = State()
+    waiting_for_hearts = State()
+    waiting_for_end_date = State()
+    waiting_for_reward_type = State()
+    waiting_for_tasks = State()
+
+
+class AdminStates(StatesGroup):
+    waiting_for_premium_username = State()  # Для активации премиума
+    waiting_for_hearts_data = State()       # Для начисления сердечек (формат: "@username количество")
+    waiting_for_ban_username = State()      # Для блокировки/разблокировки
+    waiting_for_user_history = State()      # Для просмотра истории сообщений
+    waiting_for_promotion_create = State()  # Универсальное состояние для создания акций
+
+class UserStates(StatesGroup):
+    waiting_for_name = State()            # Для получения имени при старте
+    waiting_for_diary_entry = State()     # Для записей в дневнике
+    waiting_for_diary_password = State()  # Для установки пароля
+    waiting_for_habit_create = State()    # Для создания привычек (опционально)
+
+
+class Config:
+    TRIAL_DAYS = 3
+    TRIAL_DAILY_LIMIT = 12
+    PREMIUM_DAILY_LIMIT = 20
+    FREE_WEEKLY_LIMIT = 20
+    HEARTS_PER_DAY = 3
+    CHALLENGE_REWARD = 5
+    CHALLENGE_DURATION = 120
+    REFERRAL_REWARD = 10
+    MAX_REFERRALS_PER_MONTH = 5
+
+
+class HabitCreation(StatesGroup):
+    waiting_for_title = State()
+    waiting_for_description = State()
+    waiting_for_time = State()
+
+
+class DatabaseUtils:
+    @staticmethod
+    async def get_user(telegram_id: int) -> Optional[Dict[str, Any]]:
+        """Получает пользователя из БД с обработкой ошибок"""
+        try:
+            async with async_session() as session:
+                result = await session.execute(
+                    text("SELECT * FROM users WHERE telegram_id = :telegram_id"),
+                    {"telegram_id": telegram_id}
+                )
+                user = result.mappings().first()
+                return dict(user) if user else None
+        except Exception as e:
+            logger.error(f"Error getting user {telegram_id}: {e}")
+            return None
+
+    @staticmethod
+    async def update_user(telegram_id: int, **kwargs) -> bool:
+        """Безопасное обновление пользователя"""
+        try:
+            async with async_session() as session:
+                stmt = users.update().where(users.c.telegram_id == telegram_id).values(**kwargs)
+                await session.execute(stmt)
+                await session.commit()
+                return True
+        except Exception as e:
+            logger.error(f"Error updating user {telegram_id}: {e}")
+            await session.rollback()
+            return False
+        
+        
 logging.getLogger('sqlalchemy.engine').setLevel(logging.WARNING)
 
 # Параметры
@@ -1562,21 +1635,68 @@ async def show_profile(callback: CallbackQuery):
     days_left = TRIAL_DAYS - (datetime.utcnow() - user['trial_started_at']).days if user.get('trial_started_at') else 0
     days_left = max(0, days_left)
 
+    # Определяем статус подписки
+    if user.get('is_premium'):
+        expires = user['subscription_expires_at'].strftime("%d.%m.%Y") if user.get('subscription_expires_at') else "∞"
+        status = f"💎 Премиум (до {expires})"
+        requests_left = PREMIUM_DAILY_LIMIT - user.get('total_requests', 0)
+        requests_info = f"{user.get('total_requests', 0)}/{PREMIUM_DAILY_LIMIT}"
+    elif user.get('trial_started_at'):
+        status = f"🆓 Пробный период ({days_left} дн. осталось)"
+        requests_left = TRIAL_DAILY_LIMIT - user.get('total_requests', 0)
+        requests_info = f"{user.get('total_requests', 0)}/{TRIAL_DAILY_LIMIT}"
+    else:
+        status = "🌿 Бесплатный"
+        requests_left = FREE_WEEKLY_LIMIT - user.get('total_requests', 0)
+        requests_info = f"{user.get('total_requests', 0)}/{FREE_WEEKLY_LIMIT}"
+
     text = (
-        f"👤 Профиль {name}\n\n"
-        f"💖 Сердечек: {user.get('hearts', 0)}\n"
-        f"🔹 Статус: {'Премиум' if user.get('is_premium') else f'Пробный период ({days_left} дн. осталось)'}\n"
-        f"📊 Запросов сегодня: {user.get('total_requests', 0)}/{TRIAL_DAILY_LIMIT if not user.get('is_premium') else PREMIUM_DAILY_LIMIT}\n"
+        f"👤 <b>Профиль {name}</b>\n\n"
+        f"🔹 Статус: {status}\n"
+        f"🔹 Запросов осталось: {requests_left}\n"
+        f"🔹 Сердечек: {user.get('hearts', 0)} 💖\n"
+        f"🔹 Челленджей выполнено: {user.get('completed_challenges', 0)} 🏆\n"
+        f"🔹 Рефералов: {user.get('referral_count', 0)} 👥\n\n"
+        "Выберите действие:"
     )
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="💎 Подписка", callback_data="premium_subscription")],
+        [InlineKeyboardButton(text="🛍 Магазин", callback_data="shop")],
         [InlineKeyboardButton(text="🔙 Назад", callback_data="main_menu")]
     ])
 
-    await callback.message.edit_text(text, reply_markup=keyboard)
+    await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
     await callback.answer()
 
+
+@router.callback_query(F.data == "premium_subscription")
+async def premium_subscription(callback: CallbackQuery):
+    """Меню подписки"""
+    user = await get_user(callback.from_user.id)
+    if not user:
+        await callback.answer("Сначала используйте /start")
+        return
+
+    if user.get('is_premium'):
+        expires = user['subscription_expires_at'].strftime("%d.%m.%Y") if user.get('subscription_expires_at') else "∞"
+        text = f"💎 У вас уже есть премиум-подписка (до {expires})"
+    else:
+        text = "💎 <b>Премиум подписка</b>\n\n" \
+               "Преимущества премиум-подписки:\n" \
+               "• Неограниченные запросы к ИИ\n" \
+               "• Приоритетная поддержка\n" \
+               "• Дополнительные функции\n\n" \
+               "Выберите вариант подписки:"
+
+    await callback.message.edit_text(
+        text,
+        reply_markup=get_subscription_keyboard(),
+        parse_mode="HTML"
+    )
+    await callback.answer()
+    
+    
 
 @router.callback_query(F.data == "list_promotions")
 async def list_promotions(callback: CallbackQuery):
@@ -1656,17 +1776,6 @@ async def delete_promotion(callback: CallbackQuery):
         await callback.answer("⚠️ Ошибка при удалении")
 
 
-@router.callback_query(F.data == "psychology_menu")
-async def psychology_menu(callback: CallbackQuery):
-    """Меню психологического раздела"""
-    keyboard = get_psychology_menu_keyboard()
-    await callback.message.edit_text(
-        "🧠 Психологический раздел\n\nВыберите опцию:",
-        reply_markup=keyboard
-    )
-    await callback.answer()
-
-
 @router.callback_query(F.data == "main_menu")
 async def back_to_main(callback: CallbackQuery):
     """Возврат в главное меню"""
@@ -1716,24 +1825,49 @@ async def personal_diary(callback: CallbackQuery):
 
 
 @router.callback_query(F.data == "new_diary_entry")
-async def new_diary_entry(callback: CallbackQuery):
+async def new_diary_entry(callback: CallbackQuery, state: FSMContext):
     """Новая запись в дневнике"""
-    user = await get_user(callback.from_user.id)
-    if not user:
-        await callback.answer("Сначала используйте /start")
-        return
-
-    name = user.get('name', 'друг')
     await callback.message.edit_text(
-        f"✍️ <b>Новая запись в дневнике, {name}</b>\n\n"
+        "✍️ <b>Новая запись в дневнике</b>\n\n"
         "Напишите свои мысли, чувства или события дня. Вы можете добавить эмоцию в конце сообщения, например:\n\n"
         "<i>Сегодня был продуктивный день! Я закончил важный проект. 😊</i>\n\n"
         "Доступные эмоции: 😊 😢 😠 😍 😐 😨 😭 🤔",
         parse_mode="HTML"
     )
+    await state.set_state(UserStates.waiting_for_diary_entry)
     await callback.answer()
 
 
+@router.message(StateFilter(UserStates.waiting_for_diary_entry))
+async def process_diary_entry(message: Message, state: FSMContext):
+    """Обработка записи в дневнике"""
+    entry_text = message.text.strip()
+    if len(entry_text) < 5:
+        await message.answer("Запись должна содержать минимум 5 символов. Попробуйте еще раз:")
+        return
+
+    # Извлекаем эмоцию из текста
+    mood = None
+    emotions = ["😊", "😢", "😠", "😍", "😐", "😨", "😭", "🤔"]
+    for emoji in emotions:
+        if emoji in entry_text:
+            mood = emoji
+            entry_text = entry_text.replace(emoji, "").strip()
+            break
+
+    try:
+        await create_diary_entry(message.from_user.id, entry_text, mood)
+        await message.answer(
+            "📔 Запись успешно сохранена! +5💖",
+            reply_markup=get_diary_keyboard()
+        )
+    except Exception as e:
+        logger.error(f"Ошибка сохранения записи: {e}")
+        await message.answer("⚠️ Произошла ошибка при сохранении записи. Попробуйте позже.")
+    finally:
+        await state.clear()
+        
+        
 @router.callback_query(F.data == "my_diary_entries")
 async def my_diary_entries(callback: CallbackQuery):
     """Мои записи в дневнике"""
@@ -1742,7 +1876,7 @@ async def my_diary_entries(callback: CallbackQuery):
         await callback.answer("Сначала используйте /start")
         return
 
-    entries = await get_diary_entries(user['telegram_id'])
+    entries = await get_diary_entries(callback.from_user.id)
     if not entries:
         await callback.message.edit_text(
             "📖 <b>У вас пока нет записей в дневнике</b>\n\n"
@@ -2017,7 +2151,7 @@ async def habits(callback: CallbackQuery):
 
 @router.callback_query(F.data == "referral_system")
 async def referral_system(callback: CallbackQuery):
-    """Реферальная система с ограничением 5 приглашений в месяц"""
+    """Реферальная система"""
     user = await get_user(callback.from_user.id)
     if not user:
         await callback.answer("Сначала используйте /start")
@@ -2026,25 +2160,13 @@ async def referral_system(callback: CallbackQuery):
     referrals_list = await get_user_referrals(callback.from_user.id)
     name = user.get('name', 'друг')
 
-    # Получаем текущий месяц и год
-    current_month = datetime.now().month
-    current_year = datetime.now().year
-
-    # Фильтруем рефералов за текущий месяц
-    monthly_referrals = [
-        r for r in referrals_list
-        if r['created_at'].month == current_month and r['created_at'].year == current_year
-    ]
-
     await callback.message.edit_text(
         f"💞 <b>Реферальная система, {name}</b>\n\n"
         f"👥 Всего приглашено друзей: {len(referrals_list)}\n"
-        f"📅 Приглашено в этом месяце: {len(monthly_referrals)}/{MAX_REFERRALS_PER_MONTH}\n"
         f"💖 Доступно сердечек: {user.get('hearts', 0)}\n\n"
         f"🔗 Ваша реферальная ссылка:\n"
         f"https://t.me/{(await bot.get_me()).username}?start={user['telegram_id']}\n\n"
-        f"За каждого приглашенного друга вы получаете {REFERRAL_REWARD} сердечек!\n"
-        f"⚠️ Максимум {MAX_REFERRALS_PER_MONTH} приглашений в месяц.",
+        f"За каждого приглашенного друга вы получаете {REFERRAL_REWARD} сердечек!",
         reply_markup=get_referral_keyboard(),
         parse_mode="HTML"
     )
@@ -2053,27 +2175,52 @@ async def referral_system(callback: CallbackQuery):
 
 @router.callback_query(F.data == "psychology_menu")
 async def psychology_menu(callback: CallbackQuery):
-    """Меню психологического раздела с подробным описанием"""
+    """Меню психологического раздела"""
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💬 Чат с ИИ-психологом", callback_data="ai_psychologist")],
+        [InlineKeyboardButton(text="📔 Личный дневник", callback_data="personal_diary")],
+        [InlineKeyboardButton(text="🧘‍♀️ Медитации", callback_data="meditations")],
+        [InlineKeyboardButton(text="🎯 Цели и привычки", callback_data="habits")],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="main_menu")]
+    ])
+    
+    await callback.message.edit_text(
+        "🧠 <b>Психологический раздел</b>\n\nВыберите опцию:",
+        reply_markup=keyboard,
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "my_referrals")
+async def my_referrals(callback: CallbackQuery):
+    """Список рефералов пользователя"""
     user = await get_user(callback.from_user.id)
     if not user:
         await callback.answer("Сначала используйте /start")
         return
 
-    name = user.get('name', 'друг')
-    await callback.message.edit_text(
-        f"🧠 <b>Психологический раздел, {name}</b>\n\n"
-        "Здесь вы можете получить профессиональную поддержку и улучшить свое ментальное здоровье.\n\n"
-        "<b>Доступные функции:</b>\n"
-        "💬 <b>Чат с ИИ-психологом</b> - обсудите свои мысли и чувства с искусственным интеллектом\n"
-        "📔 <b>Личный дневник</b> - записывайте свои мысли и анализируйте их (получайте 5💖 за запись)\n"
-        "🧘‍♀️ <b>Медитации</b> - практики для расслабления и осознанности (до 3 в день, 20💖 за выполнение)\n"
-        "🎯 <b>Цели и привычки</b> - работайте над своими привычками с напоминаниями\n\n"
-        "💖 За каждое действие вы получаете сердечки, которые можно потратить в магазине!",
-        reply_markup=get_psychology_menu_keyboard(),
-        parse_mode="HTML"
-    )
+    referrals_list = await get_user_referrals(callback.from_user.id)
+    
+    if not referrals_list:
+        await callback.message.edit_text(
+            "👥 <b>У вас пока нет рефералов</b>\n\n"
+            "Приглашайте друзей по вашей реферальной ссылке и получайте бонусы!",
+            reply_markup=get_referral_keyboard(),
+            parse_mode="HTML"
+        )
+    else:
+        text = "👥 <b>Ваши рефералы:</b>\n\n"
+        for ref in referrals_list:
+            text += f"• @{ref['username']} - {ref['created_at'].strftime('%d.%m.%Y')}\n"
+            
+        await callback.message.edit_text(
+            text,
+            reply_markup=get_referral_keyboard(),
+            parse_mode="HTML"
+        )
     await callback.answer()
-
+    
 
 @router.callback_query(F.data == "habits")
 async def habits(callback: CallbackQuery):
@@ -2122,82 +2269,22 @@ async def new_habit(callback: CallbackQuery):
     await callback.answer()
 
 
-class PromotionCreation(StatesGroup):
-    waiting_for_name = State()
-    waiting_for_title = State()
-    waiting_for_description = State()
-    waiting_for_promo_code = State()
-    waiting_for_discount = State()
-    waiting_for_hearts = State()
-    waiting_for_end_date = State()
-    waiting_for_reward_type = State()
-    waiting_for_tasks = State()
-
-
-class AdminStates(StatesGroup):
-    waiting_for_premium_username = State()
-    waiting_for_hearts_data = State()
-    waiting_for_ban_username = State()
-    waiting_for_promotion_title = State()
-    waiting_for_promotion_description = State()
-    waiting_for_promotion_reward = State()
-    waiting_for_user_history = State()
+@router.message(StateFilter(UserStates.waiting_for_habit_create))
+async def handle_habit_creation(message: Message, state: FSMContext):
+    data = await state.get_data()
     
-class UserStates(StatesGroup):
-    waiting_for_name = State()
-    waiting_for_habit_title = State()
-    waiting_for_habit_description = State()
-
-
-class Config:
-    TRIAL_DAYS = 3
-    TRIAL_DAILY_LIMIT = 12
-    PREMIUM_DAILY_LIMIT = 20
-    FREE_WEEKLY_LIMIT = 20
-    HEARTS_PER_DAY = 3
-    CHALLENGE_REWARD = 5
-    CHALLENGE_DURATION = 120
-    REFERRAL_REWARD = 10
-    MAX_REFERRALS_PER_MONTH = 5
-
-
-class HabitCreation(StatesGroup):
-    waiting_for_title = State()
-    waiting_for_description = State()
-    waiting_for_time = State()
-
-
-class DatabaseUtils:
-    @staticmethod
-    async def get_user(telegram_id: int) -> Optional[Dict[str, Any]]:
-        """Получает пользователя из БД с обработкой ошибок"""
-        try:
-            async with async_session() as session:
-                result = await session.execute(
-                    text("SELECT * FROM users WHERE telegram_id = :telegram_id"),
-                    {"telegram_id": telegram_id}
-                )
-                user = result.mappings().first()
-                return dict(user) if user else None
-        except Exception as e:
-            logger.error(f"Error getting user {telegram_id}: {e}")
-            return None
-
-    @staticmethod
-    async def update_user(telegram_id: int, **kwargs) -> bool:
-        """Безопасное обновление пользователя"""
-        try:
-            async with async_session() as session:
-                stmt = users.update().where(users.c.telegram_id == telegram_id).values(**kwargs)
-                await session.execute(stmt)
-                await session.commit()
-                return True
-        except Exception as e:
-            logger.error(f"Error updating user {telegram_id}: {e}")
-            await session.rollback()
-            return False
-
-
+    if 'title' not in data:
+        await state.update_data(title=message.text)
+        await message.answer("Введите описание привычки:")
+        return
+        
+    # Завершение создания
+    await state.update_data(description=message.text)
+    full_data = await state.get_data()
+    # Создаем привычку...
+    await state.clear()
+    
+    
 @router.callback_query(F.data == "create_habit")
 async def start_habit_creation(callback: CallbackQuery, state: FSMContext):
     await state.set_state(HabitCreation.waiting_for_title)
@@ -2446,20 +2533,39 @@ async def meditations_menu(callback: CallbackQuery):
     await callback.answer()
 
 @router.callback_query(F.data == "set_diary_password")
-async def set_diary_password_handler(callback: CallbackQuery):
-    """Установка пароля на дневник (исправленная версия)"""
-    user = await get_user(callback.from_user.id)
-    if not user:
-        await callback.answer("Сначала используйте /start")
-        return
-
+async def set_diary_password_handler(callback: CallbackQuery, state: FSMContext):
+    """Установка пароля на дневник"""
     await callback.message.edit_text(
         "🔐 <b>Установка пароля на дневник</b>\n\n"
-        "Введите новый пароль (минимум 6 символов):",
+        "Введите новый пароль (минимум 6 символов) или нажмите кнопку 'Отмена':",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="❌ Отмена", callback_data="personal_diary")]
+        ]),
         parse_mode="HTML"
     )
+    await state.set_state(UserStates.waiting_for_diary_password)
     await callback.answer()
 
+@router.message(StateFilter(UserStates.waiting_for_diary_password))
+async def process_diary_password(message: Message, state: FSMContext):
+    """Обработка пароля для дневника"""
+    password = message.text.strip()
+    if len(password) < 6:
+        await message.answer("⚠️ Пароль должен содержать минимум 6 символов. Попробуйте еще раз:")
+        return
+
+    try:
+        await set_diary_password(message.from_user.id, password)
+        await message.answer(
+            "🔐 Пароль успешно установлен!",
+            reply_markup=get_diary_keyboard()
+        )
+    except Exception as e:
+        logger.error(f"Ошибка при установке пароля: {e}")
+        await message.answer("⚠️ Произошла ошибка при установке пароля. Попробуйте позже.")
+    finally:
+        await state.clear()
+        
 @router.callback_query(F.data == "admin_premium")
 async def admin_premium_handler(callback: CallbackQuery, state: FSMContext):
     """Обработчик активации премиума"""
@@ -2999,6 +3105,27 @@ async def process_promotion_reward(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     
     
+@router.message(StateFilter(AdminStates.waiting_for_promotion_create))
+async def handle_promotion_creation(message: Message, state: FSMContext):
+    data = await state.get_data()
+    
+    if 'title' not in data:
+        await state.update_data(title=message.text)
+        await message.answer("Введите описание акции:")
+        return
+        
+    if 'description' not in data:
+        await state.update_data(description=message.text)
+        await message.answer("Введите награду (количество сердечек):")
+        return
+        
+    # Завершение создания
+    await state.update_data(reward=int(message.text))
+    full_data = await state.get_data()
+    # Создаем акцию...
+    await state.clear()
+    
+    
 @router.message(StateFilter(PromotionCreation.waiting_for_hearts))
 async def process_promotion_hearts(message: Message, state: FSMContext):
     """Обработка количества сердечек"""
@@ -3492,7 +3619,6 @@ async def check_payments():
 async def cmd_start(message: Message, state: FSMContext):
     """Обработка команды /start"""
     try:
-        await setup_db()
         user = await get_user(message.from_user.id)
 
         if not user:
@@ -3514,6 +3640,12 @@ async def cmd_start(message: Message, state: FSMContext):
             await state.set_state(UserStates.waiting_for_name)
             await message.answer(
                 "🌿 Добро пожаловать в бота-психолога!\n\n"
+                "Я - ваш персональный помощник для ментального здоровья. "
+                "Я помогу вам:\n"
+                "• Разобраться в своих эмоциях и мыслях\n"
+                "• Сформировать полезные привычки\n"
+                "• Ведением личного дневника\n"
+                "• Практиковать осознанность и медитации\n\n"
                 "Как вас зовут? Введите ваше имя для персонализации:")
             return
 
@@ -3534,15 +3666,200 @@ async def process_user_name(message: Message, state: FSMContext):
 
     await update_user(message.from_user.id, name=name)
     await state.clear()
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="👤 Мой профиль", callback_data="profile")],
+        [InlineKeyboardButton(text="🧠 Психология", callback_data="psychology_menu")]
+    ])
+    
     await message.answer(
-        f"✨ Отлично, {name}! Теперь вы можете пользоваться всеми функциями бота.",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🧠 Психология", callback_data="psychology_menu")],
-            [InlineKeyboardButton(text="👤 Профиль", callback_data="profile")]
-        ])
+        f"✨ Отлично, {name}! Теперь вы можете пользоваться всеми функциями бота.\n\n"
+        "Основные возможности:\n"
+        "💬 Чат с ИИ-психологом\n"
+        "📔 Личный дневник\n"
+        "🧘‍♀️ Медитации и упражнения\n"
+        "🎯 Трекер привычек\n"
+        "🏆 Ежедневные челленджи\n"
+        "💖 Магазин с полезными функциями",
+        reply_markup=keyboard
     )
 
 
+@router.callback_query(F.data == "shop")
+async def shop_menu(callback: CallbackQuery):
+    """Меню магазина"""
+    user = await get_user(callback.from_user.id)
+    if not user:
+        await callback.answer("Сначала используйте /start")
+        return
+
+    await callback.message.edit_text(
+        "🛍 <b>Магазин</b>\n\n"
+        f"💖 Ваш баланс: {user.get('hearts', 0)} сердечек\n\n"
+        "Выберите товар:",
+        reply_markup=get_shop_keyboard(),
+        parse_mode="HTML"
+    )
+    await callback.answer()
+    
+    
+@router.callback_query(F.data.startswith("shop_"))
+async def shop_item(callback: CallbackQuery):
+    """Просмотр товара в магазине"""
+    item_id = callback.data.replace("shop_", "")
+    item = next((i for i in SHOP_ITEMS if i['id'] == item_id), None)
+    
+    if not item:
+        await callback.answer("Товар не найден")
+        return
+
+    user = await get_user(callback.from_user.id)
+    if not user:
+        await callback.answer("Сначала используйте /start")
+        return
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=f"🛒 Купить за {item['price']}💖", callback_data=f"buy_{item_id}")],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="shop")]
+    ])
+
+    await callback.message.edit_text(
+        f"🛍 <b>{item['title']}</b>\n\n"
+        f"{item['description']}\n\n"
+        f"💖 Цена: {item['price']} сердечек",
+        reply_markup=keyboard,
+        parse_mode="HTML"
+    )
+    await callback.answer()
+    
+    
+@router.callback_query(F.data.startswith("buy_"))
+async def buy_item(callback: CallbackQuery):
+    """Покупка товара"""
+    item_id = callback.data.replace("buy_", "")
+    item = next((i for i in SHOP_ITEMS if i['id'] == item_id), None)
+    
+    if not item:
+        await callback.answer("Товар не найден")
+        return
+
+    user = await get_user(callback.from_user.id)
+    if not user:
+        await callback.answer("Сначала используйте /start")
+        return
+
+    if user.get('hearts', 0) < item['price']:
+        await callback.answer("Недостаточно сердечек")
+        return
+
+    # Обработка покупки в зависимости от типа товара
+    if item['type'] == "premium":
+        days = 1 if item_id == "premium_1_day" else (7 if item_id == "premium_7_days" else 30)
+        expires_at = datetime.utcnow() + timedelta(days=days)
+        await update_user(
+            callback.from_user.id,
+            is_premium=True,
+            subscription_expires_at=expires_at,
+            hearts=user.get('hearts', 0) - item['price']
+        )
+        await callback.message.edit_text(
+            f"🎉 Вы успешно приобрели {item['title']}!\n\n"
+            f"Премиум-доступ активен до {expires_at.strftime('%d.%m.%Y')}",
+            reply_markup=get_back_to_shop_keyboard()
+        )
+    else:
+        # Обработка других товаров
+        await update_user(
+            callback.from_user.id,
+            hearts=user.get('hearts', 0) - item['price']
+        )
+        await callback.message.edit_text(
+            f"🎉 Вы успешно приобрели {item['title']}!",
+            reply_markup=get_back_to_shop_keyboard()
+        )
+    
+    await callback.answer()
+    
+    
+@router.callback_query(F.data == "get_challenge")
+async def get_challenge(callback: CallbackQuery):
+    """Получение челленджа"""
+    user = await get_user(callback.from_user.id)
+    if not user:
+        await callback.answer("Сначала используйте /start")
+        return
+
+    if not await can_get_challenge(user):
+        await callback.answer("Вы уже получали челлендж сегодня. Попробуйте завтра!")
+        return
+
+    challenge = random.choice(CHALLENGES)
+    await update_user(
+        callback.from_user.id,
+        active_challenge=challenge['title'],
+        challenge_started_at=datetime.utcnow()
+    )
+
+    await callback.message.edit_text(
+        f"🏆 <b>Ваш челлендж:</b> {challenge['title']}\n\n"
+        f"{challenge['description']}\n\n"
+        f"⏱ Время выполнения: {challenge['duration']} секунд\n"
+        f"💖 Награда: {CHALLENGE_REWARD} сердечек",
+        reply_markup=get_challenge_keyboard(challenge['title']),
+        parse_mode="HTML"
+    )
+    await callback.answer()
+    
+    
+@router.callback_query(F.data.startswith("start_"))
+async def start_challenge(callback: CallbackQuery):
+    """Начало выполнения челленджа"""
+    user = await get_user(callback.from_user.id)
+    if not user or not user.get('active_challenge'):
+        await callback.answer("Челлендж не найден")
+        return
+
+    challenge = next((c for c in CHALLENGES if c['title'] == user['active_challenge']), None)
+    if not challenge:
+        await callback.answer("Ошибка: челлендж не найден")
+        return
+
+    await callback.message.edit_text(
+        f"⏳ <b>Челлендж начат:</b> {challenge['title']}\n\n"
+        f"У вас есть {challenge['duration']} секунд на выполнение.\n"
+        "Нажмите кнопку ниже по завершении.",
+        reply_markup=get_challenge_timer_keyboard(),
+        parse_mode="HTML"
+    )
+    await callback.answer()
+    
+    
+@router.callback_query(F.data == "complete_challenge")
+async def complete_challenge_handler(callback: CallbackQuery):
+    """Завершение челленджа"""
+    user = await get_user(callback.from_user.id)
+    if not user or not user.get('active_challenge'):
+        await callback.answer("Челлендж не найден")
+        return
+
+    new_hearts = await complete_challenge(callback.from_user.id)
+    if new_hearts is None:
+        await callback.answer("Ошибка завершения челленджа")
+        return
+
+    await callback.message.edit_text(
+        f"🎉 <b>Челлендж завершен!</b>\n\n"
+        f"Вы успешно выполнили: {user['active_challenge']}\n\n"
+        f"💖 Получено: +{CHALLENGE_REWARD} сердечек\n"
+        f"💰 Ваш баланс: {new_hearts} сердечек",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🏆 Получить новый челлендж", callback_data="get_challenge")]
+        ]),
+        parse_mode="HTML"
+    )
+    await callback.answer()
+    
+    
 @router.message()
 async def handle_unprocessed_messages(message: Message):
     """Обработчик для всех необработанных сообщений"""
