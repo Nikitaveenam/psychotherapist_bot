@@ -21,6 +21,8 @@ from sqlalchemy import text, MetaData, Table, Column, Integer, String, Boolean, 
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 import httpx
 from decimal import Decimal, getcontext
+from aiogram.filters.state import State, StatesGroup
+from aiogram.filters import StateFilter
 
 # --- Конфигурация ---
 load_dotenv()
@@ -202,7 +204,7 @@ PAYMENT_DETAILS = {
     "yoomoney": {
         "account": "4100119110059662",
         "comment": "ПОДДЕРЖКА и ваш @username.\n"
-        "ПРИМЕР: ПОДДЕРЖКА Ivansokolov"
+                   "ПРИМЕР: ПОДДЕРЖКА Ivansokolov"
     }
 }
 
@@ -457,6 +459,7 @@ reminders = Table(
     Column("is_active", Boolean, default=True)
 )
 
+
 # --- Вспомогательные функции ---
 async def setup_db():
     """Создает таблицы при первом запуске"""
@@ -470,6 +473,7 @@ async def setup_db():
     except Exception as e:
         logger.critical(f"❌ Ошибка при создании таблиц: {e}")
         raise
+
 
 async def get_user(telegram_id: int) -> Optional[Dict[str, Any]]:
     """Получает пользователя из БД"""
@@ -485,6 +489,7 @@ async def get_user(telegram_id: int) -> Optional[Dict[str, Any]]:
         logger.error(f"Error in get_user: {e}", exc_info=True)
         return None
 
+
 async def get_user_by_username(username: str):
     """Получение пользователя по его username"""
     async with async_session() as session:
@@ -497,34 +502,38 @@ async def get_user_by_username(username: str):
             return user
         return None
 
+
 async def save_user(user):
     """Сохранение данных пользователя в базу данных"""
     async with async_session() as session:
         session.add(user)
         await session.commit()
 
+
 async def get_user_message_history(user_id: int, days: int):
     """Получение истории сообщений пользователя за последние N дней"""
     async with async_session() as session:
         query = text("""
-            SELECT * FROM messages
-            WHERE user_id = :user_id
-            AND timestamp >= NOW() - INTERVAL :days DAY
-            ORDER BY timestamp DESC
-        """)
-        result = await session.execute(query, {"user_id": user_id, "days": days})
+                     SELECT *
+                     FROM messages
+                     WHERE user_id = :user_id
+                       AND timestamp >= NOW() - INTERVAL :days DAY
+                     ORDER BY timestamp DESC
+                     """)
+        result = await session.execute(query, {'user_id': user_id, "days": days})
         messages = result.fetchall()
         return messages
 
-async def create_user(telegram_id: int, full_name: str, username: str = None, 
-                     is_admin: bool = False, referred_by: int = None, 
-                     ip_address: int = None) -> Dict[str, Any]:
+
+async def create_user(telegram_id: int, full_name: str, username: str = None,
+                      is_admin: bool = False, referred_by: int = None,
+                      ip_address: int = None) -> Dict[str, Any]:
     """Создает нового пользователя"""
     try:
         async with async_session() as session:
             # Проверяем текущий месяц
             current_month = datetime.now().month
-            
+
             referral_code = f"REF{random.randint(1000, 9999)}"
             user_data = {
                 "telegram_id": telegram_id,
@@ -542,17 +551,17 @@ async def create_user(telegram_id: int, full_name: str, username: str = None,
                 "current_month_referrals": 0,
                 "created_at": datetime.utcnow()
             }
-            
+
             # Создание пользователя
             result = await session.execute(
                 users.insert().values(**user_data).returning(users)
             )
             await session.commit()
-            
+
             created_user = result.mappings().first()
             if not created_user:
                 raise ValueError("User creation returned empty result")
-            
+
             created_user_dict = dict(created_user)
 
             # Обработка реферала (если есть)
@@ -569,7 +578,7 @@ async def create_user(telegram_id: int, full_name: str, username: str = None,
                                 last_referral_month=current_month,
                                 current_month_referrals=0
                             )
-                        
+
                         # Проверяем лимит рефералов в текущем месяце
                         if referrer['current_month_referrals'] < MAX_REFERRALS_PER_MONTH:
                             # Обновляем данные пригласившего
@@ -579,7 +588,7 @@ async def create_user(telegram_id: int, full_name: str, username: str = None,
                                 referral_count=referrer.get('referral_count', 0) + 1,
                                 current_month_referrals=referrer.get('current_month_referrals', 0) + 1
                             )
-                            
+
                             # Добавляем запись в рефералы
                             await session.execute(
                                 referrals.insert().values(
@@ -595,12 +604,13 @@ async def create_user(telegram_id: int, full_name: str, username: str = None,
                     await session.rollback()
 
             return created_user_dict
-            
+
     except Exception as e:
         logger.error(f"Critical error in create_user: {e}", exc_info=True)
         if 'session' in locals():
             await session.rollback()
         raise
+
 
 async def update_user(telegram_id: int, **kwargs) -> bool:
     """Обновляет данные пользователя"""
@@ -609,7 +619,7 @@ async def update_user(telegram_id: int, **kwargs) -> bool:
             # Удаляем weekly_requests из kwargs, если он есть и не используется в таблице
             if 'weekly_requests' in kwargs:
                 kwargs.pop('weekly_requests')
-                
+
             stmt = users.update().where(users.c.telegram_id == telegram_id).values(**kwargs)
             await session.execute(stmt)
             await session.commit()
@@ -617,6 +627,7 @@ async def update_user(telegram_id: int, **kwargs) -> bool:
     except Exception as e:
         logger.error(f"Error updating user: {e}")
         return False
+
 
 async def log_admin_action(admin_id: int, action: str, target_user_id: int = None, details: str = None):
     """Логирует действия админа"""
@@ -631,17 +642,20 @@ async def log_admin_action(admin_id: int, action: str, target_user_id: int = Non
         )
         await session.commit()
 
+
 async def check_subscription(user: Dict[str, Any]) -> bool:
     """Проверяет активность подписки"""
     if not user or user.get('is_banned'):
         return False
     if user.get('is_admin'):
         return True
-    if user.get('is_premium') and user.get('subscription_expires_at') and user['subscription_expires_at'] > datetime.utcnow():
+    if user.get('is_premium') and user.get('subscription_expires_at') and user[
+        'subscription_expires_at'] > datetime.utcnow():
         return True
     if user.get('trial_started_at') and (datetime.utcnow() - user['trial_started_at']).days <= TRIAL_DAYS:
         return True
     return False
+
 
 async def check_request_limit(user: Dict[str, Any]) -> bool:
     """Проверяет лимиты запросов"""
@@ -672,6 +686,7 @@ async def check_request_limit(user: Dict[str, Any]) -> bool:
             )
         return user.get('total_requests', 0) < FREE_WEEKLY_LIMIT
 
+
 async def get_ai_response(prompt: str, user: Dict[str, Any]) -> str:
     """Получает ответ от ИИ с учетом лимитов пользователя и кризисных сообщений"""
     if not OPENAI_API_KEY:
@@ -681,7 +696,7 @@ async def get_ai_response(prompt: str, user: Dict[str, Any]) -> str:
             "Попробуйте выполнить один из наших челленджей или вернитесь позже.\n\n"
             "Используйте команду /challenge для получения задания!"
         )
-    
+
     crisis_keywords = ["суицид", "самоубийство", "покончить с собой", "депрессия", "не хочу жить"]
     if any(keyword in prompt.lower() for keyword in crisis_keywords):
         return (
@@ -700,13 +715,13 @@ async def get_ai_response(prompt: str, user: Dict[str, Any]) -> str:
     try:
         from openai import OpenAI
         client = OpenAI(api_key=OPENAI_API_KEY)
-        
+
         response = await asyncio.to_thread(
             client.chat.completions.create,
             model="gpt-3.5-turbo",
             messages=[
                 {
-                    "role": "system", 
+                    "role": "system",
                     "content": (
                         "Ты - доброжелательный ИИ-психолог. Отвечай с эмпатией и поддержкой. "
                         "Не ставь диагнозы, но мягко направляй к специалистам при необходимости. "
@@ -728,26 +743,28 @@ async def get_ai_response(prompt: str, user: Dict[str, Any]) -> str:
             "Используйте команду /challenge для получения задания!"
         )
 
+
 async def can_get_challenge(user: Dict[str, Any]) -> bool:
     """Проверяет, может ли пользователь получить новый челлендж"""
     if not user:
         return False
-        
+
     last_challenge = user.get('last_challenge_time')
     if last_challenge is None:
         return True
-        
+
     now = datetime.utcnow()
     # Челленджи обновляются в 9:00 и 18:00 по МСК (6:00 и 15:00 UTC)
     challenge_reset_time1 = now.replace(hour=6, minute=0, second=0, microsecond=0)
     challenge_reset_time2 = now.replace(hour=15, minute=0, second=0, microsecond=0)
-    
+
     if now.hour < 6:
         challenge_reset_time1 -= timedelta(days=1)
     elif now.hour < 15:
         challenge_reset_time2 -= timedelta(days=1)
-    
+
     return last_challenge < challenge_reset_time1 or last_challenge < challenge_reset_time2
+
 
 async def complete_challenge(user_id: int):
     """Завершает активный челлендж и награждает пользователя"""
@@ -770,6 +787,7 @@ async def complete_challenge(user_id: int):
             return new_hearts
     return None
 
+
 async def get_crypto_rate(crypto: str) -> Optional[Decimal]:
     """Получает текущий курс криптовалюты"""
     try:
@@ -783,6 +801,7 @@ async def get_crypto_rate(crypto: str) -> Optional[Decimal]:
         logger.error(f"Ошибка получения курса {crypto}: {e}")
         return None
 
+
 async def calculate_crypto_amount(rub_amount: Decimal, crypto: str) -> Optional[Decimal]:
     """Рассчитывает сумму в криптовалюте"""
     rate = await get_crypto_rate(crypto)
@@ -790,9 +809,11 @@ async def calculate_crypto_amount(rub_amount: Decimal, crypto: str) -> Optional[
         return None
     return (rub_amount / rate).quantize(Decimal('0.00000001'))
 
+
 async def check_crypto_payment(address: str, expected_amount: Decimal, crypto: str) -> bool:
     """Проверяет поступление платежа"""
     return True
+
 
 async def get_recent_users(limit: int = 10) -> List[Dict[str, Any]]:
     """Получает последних зарегистрированных пользователей"""
@@ -803,14 +824,17 @@ async def get_recent_users(limit: int = 10) -> List[Dict[str, Any]]:
         )
         return [dict(row) for row in result.mappings()]
 
+
 async def get_user_messages(user_id: int, days: int = 1) -> List[Dict[str, Any]]:
     """Получает сообщения пользователя за последние дни"""
     async with async_session() as session:
         result = await session.execute(
-            text("SELECT message_text, created_at FROM user_messages WHERE user_id = :user_id AND created_at >= NOW() - INTERVAL ':days days' ORDER BY created_at DESC"),
+            text(
+                "SELECT message_text, created_at FROM user_messages WHERE user_id = :user_id AND created_at >= NOW() - INTERVAL ':days days' ORDER BY created_at DESC"),
             {"user_id": user_id, "days": days}
         )
         return [dict(row) for row in result.mappings()]
+
 
 async def create_promotion(title: str, description: str, promo_code: str, discount_percent: int, hearts_reward: int,
                            start_date: datetime, end_date: datetime, tasks: str = None, reward_type: str = "hearts"):
@@ -863,7 +887,6 @@ async def create_promotion(title: str, description: str, promo_code: str, discou
         raise
 
 
-
 async def get_promotions() -> List[Dict[str, Any]]:
     """Получает список активных акций"""
     async with async_session() as session:
@@ -871,6 +894,7 @@ async def get_promotions() -> List[Dict[str, Any]]:
             text("SELECT * FROM promotions WHERE end_date >= NOW()")
         )
         return [dict(row) for row in result.mappings()]
+
 
 async def get_user_referrals(user_id: int) -> List[Dict[str, Any]]:
     """Получает список рефералов пользователя"""
@@ -881,6 +905,7 @@ async def get_user_referrals(user_id: int) -> List[Dict[str, Any]]:
         )
         return [dict(row) for row in result.mappings()]
 
+
 async def get_diary_entries(user_id: int) -> List[Dict[str, Any]]:
     """Получает записи дневника пользователя"""
     async with async_session() as session:
@@ -889,6 +914,7 @@ async def get_diary_entries(user_id: int) -> List[Dict[str, Any]]:
             {"user_id": user_id}
         )
         return [dict(row) for row in result.mappings()]
+
 
 async def create_diary_entry(user_id: int, entry_text: str, mood: str = None):
     """Создает запись в дневнике"""
@@ -901,12 +927,13 @@ async def create_diary_entry(user_id: int, entry_text: str, mood: str = None):
             )
         )
         await session.commit()
-        
+
         # Награждаем пользователя за запись в дневнике
         user = await get_user(user_id)
         if user:
             new_hearts = user.get('hearts', 0) + 5  # 5 сердечек за запись
             await update_user(user_id, hearts=new_hearts)
+
 
 async def set_diary_password(user_id: int, password: str):
     """Устанавливает пароль на дневник"""
@@ -918,9 +945,11 @@ async def set_diary_password(user_id: int, password: str):
         )
         await session.commit()
 
+
 async def get_meditations() -> List[Dict[str, Any]]:
     """Получает список медитаций"""
     return MEDITATIONS
+
 
 async def get_habit(user_id: int, habit_id: int) -> Optional[Dict[str, Any]]:
     """Получает привычку пользователя"""
@@ -932,6 +961,7 @@ async def get_habit(user_id: int, habit_id: int) -> Optional[Dict[str, Any]]:
         row = result.mappings().first()
         return dict(row) if row else None
 
+
 async def get_user_habits(user_id: int) -> List[Dict[str, Any]]:
     """Получает привычки пользователя"""
     async with async_session() as session:
@@ -941,8 +971,9 @@ async def get_user_habits(user_id: int) -> List[Dict[str, Any]]:
         )
         return [dict(row) for row in result.mappings()]
 
-async def create_habit(user_id: int, title: str, description: str, reminder_enabled: bool = False, 
-                      reminder_time: str = None, reminder_frequency: str = None):
+
+async def create_habit(user_id: int, title: str, description: str, reminder_enabled: bool = False,
+                       reminder_time: str = None, reminder_frequency: str = None):
     """Создает новую привычку"""
     async with async_session() as session:
         result = await session.execute(
@@ -956,13 +987,14 @@ async def create_habit(user_id: int, title: str, description: str, reminder_enab
             ).returning(habits)
         )
         await session.commit()
-        
+
         habit = result.mappings().first()
         if habit and reminder_enabled and reminder_time and reminder_frequency:
             # Создаем напоминание
             await create_reminder(user_id, habit['id'], reminder_time, reminder_frequency)
-        
+
         return dict(habit) if habit else None
+
 
 async def complete_habit(habit_id: int):
     """Отмечает привычку как выполненную"""
@@ -972,7 +1004,7 @@ async def complete_habit(habit_id: int):
             .where(habits.c.id == habit_id)
             .values(completed=True, completed_at=datetime.utcnow())
         )
-        
+
         await session.execute(
             habit_completions.insert().values(
                 habit_id=habit_id,
@@ -981,13 +1013,14 @@ async def complete_habit(habit_id: int):
         )
         await session.commit()
 
+
 async def create_reminder(user_id: int, habit_id: int, reminder_time: str, frequency: str):
     """Создает напоминание для привычки"""
     async with async_session() as session:
         # Рассчитываем следующее напоминание
         now = datetime.now()
         reminder_hour, reminder_minute = map(int, reminder_time.split(':'))
-        
+
         if frequency == "daily":
             next_reminder = now.replace(hour=reminder_hour, minute=reminder_minute, second=0, microsecond=0)
             if next_reminder < now:
@@ -1004,7 +1037,7 @@ async def create_reminder(user_id: int, habit_id: int, reminder_time: str, frequ
             next_reminder = now.replace(hour=reminder_hour, minute=reminder_minute, second=0, microsecond=0)
             if next_reminder < now:
                 next_reminder += timedelta(days=1)
-        
+
         await session.execute(
             reminders.insert().values(
                 user_id=user_id,
@@ -1016,6 +1049,7 @@ async def create_reminder(user_id: int, habit_id: int, reminder_time: str, frequ
         )
         await session.commit()
 
+
 async def get_habit_completions(habit_id: int) -> List[Dict[str, Any]]:
     """Получает историю выполнения привычки"""
     async with async_session() as session:
@@ -1025,43 +1059,48 @@ async def get_habit_completions(habit_id: int) -> List[Dict[str, Any]]:
         )
         return [dict(row) for row in result.mappings()]
 
+
 async def get_user_stats(user_id: int, days: int = 7) -> Dict[str, Any]:
     """Получает статистику пользователя за указанный период"""
     async with async_session() as session:
         # Получаем количество выполненных челленджей
         result = await session.execute(
-            text("SELECT COUNT(*) FROM users WHERE telegram_id = :user_id AND last_challenge_time >= NOW() - INTERVAL ':days days'"),
+            text(
+                "SELECT COUNT(*) FROM users WHERE telegram_id = :user_id AND last_challenge_time >= NOW() - INTERVAL ':days days'"),
             {"user_id": user_id, "days": days}
         )
         challenges_completed = result.scalar() or 0
-        
+
         # Получаем количество записей в дневнике
         result = await session.execute(
-            text("SELECT COUNT(*) FROM diary_entries WHERE user_id = :user_id AND created_at >= NOW() - INTERVAL ':days days'"),
+            text(
+                "SELECT COUNT(*) FROM diary_entries WHERE user_id = :user_id AND created_at >= NOW() - INTERVAL ':days days'"),
             {"user_id": user_id, "days": days}
         )
         diary_entries = result.scalar() or 0
-        
+
         # Получаем количество выполненных привычек
         result = await session.execute(
-            text("SELECT COUNT(*) FROM habit_completions WHERE habit_id IN (SELECT id FROM habits WHERE user_id = :user_id) AND completed_at >= NOW() - INTERVAL ':days days'"),
+            text(
+                "SELECT COUNT(*) FROM habit_completions WHERE habit_id IN (SELECT id FROM habits WHERE user_id = :user_id) AND completed_at >= NOW() - INTERVAL ':days days'"),
             {"user_id": user_id, "days": days}
         )
         habits_completed = result.scalar() or 0
-        
+
         # Получаем заработанные сердечки
         result = await session.execute(
             text("SELECT hearts FROM users WHERE telegram_id = :user_id"),
             {"user_id": user_id}
         )
         hearts = result.scalar() or 0
-        
+
         return {
             "challenges_completed": challenges_completed,
             "diary_entries": diary_entries,
             "habits_completed": habits_completed,
             "hearts_earned": hearts
         }
+
 
 # --- Клавиатуры ---
 def get_challenge_keyboard(challenge_id: str):
@@ -1072,6 +1111,7 @@ def get_challenge_keyboard(challenge_id: str):
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
+
 def get_challenge_timer_keyboard():
     """Клавиатура с таймером челленджа"""
     buttons = [
@@ -1080,6 +1120,7 @@ def get_challenge_timer_keyboard():
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
+
 def get_shop_keyboard():
     """Клавиатура магазина"""
     buttons = []
@@ -1087,6 +1128,7 @@ def get_shop_keyboard():
         buttons.append([InlineKeyboardButton(text=item["title"], callback_data=f"shop_{item['id']}")])
     buttons.append([InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_main")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
+
 
 def get_subscription_keyboard():
     """Клавиатура выбора подписки"""
@@ -1100,6 +1142,7 @@ def get_subscription_keyboard():
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
+
 def get_hearts_subscription_keyboard():
     """Клавиатура подписки за сердечки"""
     buttons = [
@@ -1110,6 +1153,7 @@ def get_hearts_subscription_keyboard():
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
+
 def get_payment_method_keyboard():
     """Клавиатура выбора способа оплаты"""
     buttons = [
@@ -1118,6 +1162,7 @@ def get_payment_method_keyboard():
         [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_subscription")]
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
+
 
 def get_admin_keyboard():
     """Клавиатура админа"""
@@ -1132,12 +1177,14 @@ def get_admin_keyboard():
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
+
 def get_back_to_shop_keyboard():
     """Клавиатура возврата в магазин"""
     buttons = [
         [InlineKeyboardButton(text="🔙 В магазин", callback_data="back_to_shop")]
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
+
 
 def get_psychology_menu_keyboard():
     """Клавиатура психологического раздела"""
@@ -1150,6 +1197,7 @@ def get_psychology_menu_keyboard():
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
+
 def get_diary_keyboard():
     """Клавиатура дневника"""
     buttons = [
@@ -1161,6 +1209,7 @@ def get_diary_keyboard():
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
+
 def get_diary_entries_keyboard():
     """Клавиатура для просмотра записей дневника"""
     buttons = [
@@ -1171,6 +1220,7 @@ def get_diary_entries_keyboard():
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
+
 def get_meditation_keyboard(meditation_id: int):
     """Клавиатура медитации"""
     buttons = [
@@ -1180,6 +1230,7 @@ def get_meditation_keyboard(meditation_id: int):
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
+
 def get_meditation_timer_keyboard(meditation_id: int):
     """Клавиатура с таймером медитации"""
     buttons = [
@@ -1187,6 +1238,7 @@ def get_meditation_timer_keyboard(meditation_id: int):
         [InlineKeyboardButton(text="❌ Выйти (без награды)", callback_data="cancel_meditation")]
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
+
 
 def get_habits_keyboard():
     """Клавиатура раздела привычек"""
@@ -1196,6 +1248,7 @@ def get_habits_keyboard():
         [InlineKeyboardButton(text="🔙 Назад", callback_data="psychology_menu")]
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
+
 
 def get_habit_frequency_keyboard():
     """Клавиатура выбора частоты напоминаний"""
@@ -1207,12 +1260,14 @@ def get_habit_frequency_keyboard():
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
+
 def get_back_to_habits_keyboard():
     """Клавиатура возврата к привычкам"""
     buttons = [
         [InlineKeyboardButton(text="🔙 К привычкам", callback_data="habits")]
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
+
 
 def get_referral_keyboard():
     """Клавиатура реферальной системы"""
@@ -1224,12 +1279,14 @@ def get_referral_keyboard():
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
+
 def get_back_keyboard(callback_data: str):
     """Универсальная кнопка Назад"""
     buttons = [
         [InlineKeyboardButton(text="🔙 Назад", callback_data=callback_data)]
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
+
 
 # --- Команды для пользователей ---
 @router.message(Command("start"))
@@ -1279,7 +1336,7 @@ async def cmd_start(message: Message):
             "которые можно обменять на полезные функции в магазине.\n\n"
             "Давай начнем наш путь к гармонии вместе! Выбери раздел:"
         )
-        
+
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="👤 Мой профиль", callback_data="profile")],
             [InlineKeyboardButton(text="🧠 Психология", callback_data="psychology_menu")],
@@ -1287,16 +1344,17 @@ async def cmd_start(message: Message):
             [InlineKeyboardButton(text="🏆 Челленджи", callback_data="get_challenge")],
             [InlineKeyboardButton(text="🛍 Магазин", callback_data="shop")]
         ])
-        
+
         await message.answer(welcome_msg, reply_markup=keyboard, parse_mode="HTML")
-        
+
         # Если это новый пользователь, запрашиваем имя
         if not user.get('name'):
             await message.answer("Как тебя зовут? Напиши свое имя для персонализации:")
-    
+
     except Exception as e:
         logger.error(f"Ошибка в обработчике /start: {e}", exc_info=True)
         await message.answer("Произошла ошибка. Пожалуйста, попробуйте позже.")
+
 
 async def show_main_menu(user_id: int, message: Message):
     """Показывает главное меню с учетом прав пользователя"""
@@ -1304,9 +1362,9 @@ async def show_main_menu(user_id: int, message: Message):
     if not user:
         await message.answer("Сначала используйте /start")
         return
-    
+
     name = user.get('name', 'друг')
-    
+
     if user.get('is_admin'):
         await message.answer(
             f"👑 Админ-панель, {name}",
@@ -1320,11 +1378,12 @@ async def show_main_menu(user_id: int, message: Message):
             [InlineKeyboardButton(text="🏆 Челленджи", callback_data="get_challenge")],
             [InlineKeyboardButton(text="🛍 Магазин", callback_data="shop")]
         ])
-        
+
         await message.answer(
             f"Привет, {name}!\n\nВыберите раздел:",
             reply_markup=keyboard
         )
+
 
 async def handle_name_input(message: Message):
     """Обработка ввода имени пользователя"""
@@ -1332,16 +1391,16 @@ async def handle_name_input(message: Message):
     if not user:
         await message.answer("❌ Сначала используйте /start")
         return
-    
+
     # Если имя еще не установлено
     if not user.get('name'):
         name = message.text.strip()
         if len(name) < 2:
             await message.answer("⚠️ Имя должно содержать минимум 2 символа. Попробуйте еще раз:")
             return
-            
+
         await update_user(message.from_user.id, name=name)
-        
+
         # Приветственное сообщение после установки имени
         welcome_msg = (
             f"✨ Привет, {name}! Добро пожаловать в психологический помощник. ✨\n\n"
@@ -1359,16 +1418,17 @@ async def handle_name_input(message: Message):
             "💖 Зарабатывай сердечки за активность и трать их в магазине на полезные функции.\n\n"
             "Рекомендую начать с раздела 'Психология' или посмотреть свой профиль:"
         )
-        
+
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="👤 Мой профиль", callback_data="profile")],
             [InlineKeyboardButton(text="🧠 Психология", callback_data="psychology_menu")],
             [InlineKeyboardButton(text="💞 Реферальная система", callback_data="referral_system")]
         ])
-        
+
         await message.answer(welcome_msg, reply_markup=keyboard)
     else:
         await handle_text_message(message)
+
 
 async def show_user_profile(user_id: int, message: Message):
     """Показывает профиль пользователя с красивым оформлением"""
@@ -1376,15 +1436,16 @@ async def show_user_profile(user_id: int, message: Message):
     if not user:
         await message.answer("Сначала используйте /start")
         return
-    
+
     name = user.get('name', 'друг')
     days_left = TRIAL_DAYS - (datetime.utcnow() - user['trial_started_at']).days if user.get('trial_started_at') else 0
     days_left = max(0, days_left)
-    
+
     # Определяем статус подписки
     if await check_subscription(user):
         if user.get('is_premium'):
-            expires = user['subscription_expires_at'].strftime("%d.%m.%Y") if user.get('subscription_expires_at') else "∞"
+            expires = user['subscription_expires_at'].strftime("%d.%m.%Y") if user.get(
+                'subscription_expires_at') else "∞"
             status = f"💎 Премиум (до {expires})"
             requests_left = PREMIUM_DAILY_LIMIT + user.get('extra_requests', 0) - user.get('total_requests', 0)
             requests_info = f"{user.get('total_requests', 0)}/{PREMIUM_DAILY_LIMIT + user.get('extra_requests', 0)}"
@@ -1396,12 +1457,12 @@ async def show_user_profile(user_id: int, message: Message):
         status = "🌿 Бесплатный"
         requests_left = FREE_WEEKLY_LIMIT - user.get('total_requests', 0)
         requests_info = f"{user.get('total_requests', 0)}/{FREE_WEEKLY_LIMIT}"
-    
+
     # Определяем прогресс привычек
     habits = await get_user_habits(user_id)
     completed_habits = sum(1 for h in habits if h.get('completed'))
     habits_progress = f"{completed_habits}/{len(habits)}" if habits else "0/0"
-    
+
     # Формируем сообщение профиля
     profile_msg = (
         f"👤 <b>Профиль {name}</b>\n\n"
@@ -1413,7 +1474,7 @@ async def show_user_profile(user_id: int, message: Message):
         f"🔹 Рефералов: {user.get('referral_count', 0)} 👥\n\n"
         "<b>Достижения за последние 5 дней:</b>\n"
     )
-    
+
     # Добавляем статистику за последние 5 дней
     stats = await get_user_stats(user_id, 5)
     if stats:
@@ -1423,7 +1484,7 @@ async def show_user_profile(user_id: int, message: Message):
             f"- Привычек выполнено: {stats['habits_completed']}\n"
             f"- Сердечек заработано: {stats['hearts_earned']}\n\n"
         )
-    
+
     # Кнопки управления
     buttons = [
         [InlineKeyboardButton(text="💎 Оформить подписку", callback_data="premium_subscription")],
@@ -1432,17 +1493,19 @@ async def show_user_profile(user_id: int, message: Message):
         [InlineKeyboardButton(text="🧠 Психология", callback_data="psychology_menu")],
         [InlineKeyboardButton(text="💞 Реферальная система", callback_data="referral_system")]
     ]
-    
+
     await message.answer(
         profile_msg,
         reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
         parse_mode="HTML"
     )
 
+
 @router.message(Command("profile"))
 async def cmd_profile(message: Message):
     """Команда профиля"""
     await show_user_profile(message.from_user.id, message)
+
 
 @router.message(Command("psychology"))
 async def cmd_psychology(message: Message):
@@ -1451,7 +1514,7 @@ async def cmd_psychology(message: Message):
     if not user:
         await message.answer("Сначала используйте /start")
         return
-    
+
     name = user.get('name', 'друг')
     await message.answer(
         f"🧠 <b>Психологический раздел, {name}</b>\n\n"
@@ -1468,6 +1531,7 @@ async def cmd_psychology(message: Message):
         parse_mode="HTML"
     )
 
+
 @router.message(Command("admin"))
 async def cmd_admin(message: Message):
     """Обработка команды /admin"""
@@ -1475,48 +1539,39 @@ async def cmd_admin(message: Message):
     if not user or not user.get('is_admin'):
         await message.answer("Доступ запрещен")
         return
-    
+
     await message.answer(
         "👑 Админ-панель",
         reply_markup=get_admin_keyboard()
     )
 
+
 @router.callback_query(F.data == "profile")
 async def show_profile(callback: CallbackQuery):
-    """Обработчик кнопки профиля пользователя"""
-    try:
-        user = await get_user(callback.from_user.id)
-        if not user:
-            await callback.answer("Сначала используйте /start")
-            return
-        
-        name = user.get('name', 'друг')
-        days_left = (user['trial_started_at'] + timedelta(days=TRIAL_DAYS) - datetime.utcnow()).days if user.get('trial_started_at') else 0
-        
-        # Формируем сообщение профиля
-        profile_msg = (
-            f"👤 Профиль {name}\n\n"
-            f"🔹 Статус: {'Пробный период' if not user.get('is_premium') else 'Премиум'}\n"
-            f"🔹 Осталось дней: {max(0, days_left)}\n"
-            f"🔹 Сердечек: {user.get('hearts', 0)}\n"
-            f"🔹 Запросов сегодня: {user.get('total_requests', 0)}/{TRIAL_DAILY_LIMIT}\n"
-            f"🔹 Рефералов: {user.get('referral_count', 0)}\n\n"
-            "Используй сердечки в магазине или приглашай друзей!"
-        )
-        
-        # Создаем клавиатуру профиля
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🛍 Магазин", callback_data="shop")],
-            [InlineKeyboardButton(text="💞 Рефералы", callback_data="referral_system")],
-            [InlineKeyboardButton(text="🔙 Назад", callback_data="main_menu")]
-        ])
-        
-        await callback.message.edit_text(profile_msg, reply_markup=keyboard)
-        await callback.answer()
-        
-    except Exception as e:
-        logger.error(f"Ошибка в обработчике профиля: {e}")
-        await callback.answer("Произошла ошибка при загрузке профиля")
+    """Показывает профиль пользователя"""
+    user = await get_user(callback.from_user.id)
+    if not user:
+        await callback.answer("Сначала используйте /start")
+        return
+
+    name = user.get('name', 'друг')
+    days_left = TRIAL_DAYS - (datetime.utcnow() - user['trial_started_at']).days if user.get('trial_started_at') else 0
+    days_left = max(0, days_left)
+
+    text = (
+        f"👤 Профиль {name}\n\n"
+        f"💖 Сердечек: {user.get('hearts', 0)}\n"
+        f"🔹 Статус: {'Премиум' if user.get('is_premium') else f'Пробный период ({days_left} дн. осталось)'}\n"
+        f"📊 Запросов сегодня: {user.get('total_requests', 0)}/{TRIAL_DAILY_LIMIT if not user.get('is_premium') else PREMIUM_DAILY_LIMIT}\n"
+    )
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💎 Подписка", callback_data="premium_subscription")],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="main_menu")]
+    ])
+
+    await callback.message.edit_text(text, reply_markup=keyboard)
+    await callback.answer()
 
 
 @router.callback_query(F.data == "list_promotions")
@@ -1596,29 +1651,24 @@ async def delete_promotion(callback: CallbackQuery):
         logger.error(f"Ошибка при удалении акции: {e}")
         await callback.answer("⚠️ Ошибка при удалении")
 
+
 @router.callback_query(F.data == "psychology_menu")
 async def psychology_menu(callback: CallbackQuery):
     """Меню психологического раздела"""
-    user = await get_user(callback.from_user.id)
-    if not user:
-        await callback.answer("Сначала используйте /start")
-        return
-    
-    name = user.get('name', 'друг')
+    keyboard = get_psychology_menu_keyboard()
     await callback.message.edit_text(
-        f"🧠 <b>Психологический раздел, {name}</b>\n\n"
-        "Здесь вы можете получить профессиональную поддержку, вести дневник и улучшить свое ментальное здоровье.\n\n"
-        "Выберите опцию:",
-        reply_markup=get_psychology_menu_keyboard(),
-        parse_mode="HTML"
+        "🧠 Психологический раздел\n\nВыберите опцию:",
+        reply_markup=keyboard
     )
     await callback.answer()
+
 
 @router.callback_query(F.data == "main_menu")
 async def back_to_main(callback: CallbackQuery):
     """Возврат в главное меню"""
     await show_main_menu(callback.from_user.id, callback.message)
     await callback.answer()
+
 
 @router.callback_query(F.data == "ai_psychologist")
 async def ai_psychologist(callback: CallbackQuery):
@@ -1627,7 +1677,7 @@ async def ai_psychologist(callback: CallbackQuery):
     if not user:
         await callback.answer("Сначала используйте /start")
         return
-    
+
     name = user.get('name', 'друг')
     await callback.message.edit_text(
         f"💬 <b>Чат с ИИ-психологом, {name}</b>\n\n"
@@ -1640,6 +1690,7 @@ async def ai_psychologist(callback: CallbackQuery):
     )
     await callback.answer()
 
+
 @router.callback_query(F.data == "personal_diary")
 async def personal_diary(callback: CallbackQuery):
     """Личный дневник"""
@@ -1647,7 +1698,7 @@ async def personal_diary(callback: CallbackQuery):
     if not user:
         await callback.answer("Сначала используйте /start")
         return
-    
+
     name = user.get('name', 'друг')
     await callback.message.edit_text(
         f"📔 <b>Личный дневник, {name}</b>\n\n"
@@ -1659,6 +1710,7 @@ async def personal_diary(callback: CallbackQuery):
     )
     await callback.answer()
 
+
 @router.callback_query(F.data == "new_diary_entry")
 async def new_diary_entry(callback: CallbackQuery):
     """Новая запись в дневнике"""
@@ -1666,7 +1718,7 @@ async def new_diary_entry(callback: CallbackQuery):
     if not user:
         await callback.answer("Сначала используйте /start")
         return
-    
+
     name = user.get('name', 'друг')
     await callback.message.edit_text(
         f"✍️ <b>Новая запись в дневнике, {name}</b>\n\n"
@@ -1677,6 +1729,7 @@ async def new_diary_entry(callback: CallbackQuery):
     )
     await callback.answer()
 
+
 @router.callback_query(F.data == "my_diary_entries")
 async def my_diary_entries(callback: CallbackQuery):
     """Мои записи в дневнике"""
@@ -1684,7 +1737,7 @@ async def my_diary_entries(callback: CallbackQuery):
     if not user:
         await callback.answer("Сначала используйте /start")
         return
-    
+
     entries = await get_diary_entries(user['telegram_id'])
     if not entries:
         await callback.message.edit_text(
@@ -1699,13 +1752,14 @@ async def my_diary_entries(callback: CallbackQuery):
             date = entry['created_at'].strftime("%d.%m.%Y %H:%M")
             mood = entry.get('mood', '')
             text += f"📅 <b>{date}</b> {mood}\n{entry['entry_text'][:100]}...\n\n"
-        
+
         await callback.message.edit_text(
             text,
             reply_markup=get_diary_keyboard(),
             parse_mode="HTML"
         )
     await callback.answer()
+
 
 @router.callback_query(F.data == "set_diary_password")
 async def set_diary_password(callback: CallbackQuery):
@@ -1714,7 +1768,7 @@ async def set_diary_password(callback: CallbackQuery):
     if not user:
         await callback.answer("Сначала используйте /start")
         return
-    
+
     name = user.get('name', 'друг')
     await callback.message.edit_text(
         f"🔐 <b>Установка пароля на дневник, {name}</b>\n\n"
@@ -1724,6 +1778,7 @@ async def set_diary_password(callback: CallbackQuery):
     )
     await callback.answer()
 
+
 @router.callback_query(F.data == "meditations")
 async def meditations_menu(callback: CallbackQuery):
     """Меню медитаций"""
@@ -1731,7 +1786,7 @@ async def meditations_menu(callback: CallbackQuery):
     if not user:
         await callback.answer("Сначала используйте /start")
         return
-    
+
     meditations_list = await get_meditations()
     if not meditations_list:
         await callback.message.edit_text(
@@ -1744,9 +1799,9 @@ async def meditations_menu(callback: CallbackQuery):
         text = "🧘‍♀️ <b>Доступные медитации:</b>\n\n"
         for meditation in meditations_list:
             text += f"• {meditation['title']} ({meditation['duration']} мин.) - {meditation['hearts_reward']}💖\n"
-        
+
         text += "\nВыберите медитацию для подробного просмотра:"
-        
+
         buttons = []
         for meditation in meditations_list:
             buttons.append([InlineKeyboardButton(
@@ -1754,7 +1809,7 @@ async def meditations_menu(callback: CallbackQuery):
                 callback_data=f"view_meditation_{meditation['id']}"
             )])
         buttons.append([InlineKeyboardButton(text="🔙 Назад", callback_data="psychology_menu")])
-        
+
         await callback.message.edit_text(
             text,
             reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
@@ -1762,22 +1817,23 @@ async def meditations_menu(callback: CallbackQuery):
         )
     await callback.answer()
 
+
 @router.callback_query(F.data.startswith("view_meditation_"))
 async def view_meditation(callback: CallbackQuery):
     """Просмотр медитации"""
     meditation_id = int(callback.data.replace("view_meditation_", ""))
     meditation = None
     meditations_list = await get_meditations()
-    
+
     for m in meditations_list:
         if m['id'] == meditation_id:
             meditation = m
             break
-    
+
     if not meditation:
         await callback.answer("Медитация не найдена")
         return
-    
+
     await callback.message.edit_text(
         f"🧘‍♀️ <b>{meditation['title']}</b>\n\n"
         f"⏱ Длительность: {meditation['duration']} минут\n"
@@ -1789,6 +1845,7 @@ async def view_meditation(callback: CallbackQuery):
     )
     await callback.answer()
 
+
 @router.callback_query(F.data.startswith("start_meditation_"))
 async def start_meditation(callback: CallbackQuery):
     """Начало медитации"""
@@ -1797,23 +1854,23 @@ async def start_meditation(callback: CallbackQuery):
     if not user:
         await callback.answer("Сначала используйте /start")
         return
-    
+
     meditation = None
     meditations_list = await get_meditations()
-    
+
     for m in meditations_list:
         if m['id'] == meditation_id:
             meditation = m
             break
-    
+
     if not meditation:
         await callback.answer("Медитация не найдена")
         return
-    
+
     if user.get('hearts', 0) < meditation['hearts_reward']:
         await callback.answer(f"Недостаточно сердечек. Нужно: {meditation['hearts_reward']}")
         return
-    
+
     # Начинаем медитацию
     await callback.message.edit_text(
         f"🧘‍♀️ <b>Начало медитации: {meditation['title']}</b>\n\n"
@@ -1827,6 +1884,7 @@ async def start_meditation(callback: CallbackQuery):
     )
     await callback.answer()
 
+
 @router.callback_query(F.data.startswith("complete_meditation_"))
 async def complete_meditation(callback: CallbackQuery):
     """Завершение медитации"""
@@ -1835,26 +1893,26 @@ async def complete_meditation(callback: CallbackQuery):
     if not user:
         await callback.answer("Сначала используйте /start")
         return
-    
+
     meditation = None
     meditations_list = await get_meditations()
-    
+
     for m in meditations_list:
         if m['id'] == meditation_id:
             meditation = m
             break
-    
+
     if not meditation:
         await callback.answer("Медитация не найдена")
         return
-    
+
     # Начисляем награду
     new_hearts = user.get('hearts', 0) + meditation['hearts_reward']
     await update_user(
         user['telegram_id'],
         hearts=new_hearts
     )
-    
+
     await callback.message.edit_text(
         f"🎉 <b>Медитация завершена!</b>\n\n"
         f"Вы успешно выполнили: {meditation['title']}\n\n"
@@ -1865,6 +1923,7 @@ async def complete_meditation(callback: CallbackQuery):
     )
     await callback.answer()
 
+
 @router.callback_query(F.data == "weekly_plan")
 async def weekly_plan(callback: CallbackQuery):
     """План на неделю"""
@@ -1872,9 +1931,9 @@ async def weekly_plan(callback: CallbackQuery):
     if not user:
         await callback.answer("Сначала используйте /start")
         return
-    
+
     plan = await get_weekly_plan(user['telegram_id'])
-    
+
     if plan:
         await callback.message.edit_text(
             "📅 <b>Ваш план на неделю</b>\n\n"
@@ -1898,10 +1957,12 @@ async def weekly_plan(callback: CallbackQuery):
         )
     await callback.answer()
 
+
 @router.errors()
 async def errors_handler(event: ErrorEvent):  # Для aiogram 3.x
     logger.error(f"Ошибка: {event.exception}")
     return True
+
 
 @router.callback_query(F.data == "edit_weekly_plan")
 async def edit_weekly_plan(callback: CallbackQuery):
@@ -1910,7 +1971,7 @@ async def edit_weekly_plan(callback: CallbackQuery):
     if not user:
         await callback.answer("Сначала используйте /start")
         return
-    
+
     name = user.get('name', 'друг')
     await callback.message.edit_text(
         f"✏️ <b>Редактирование плана на неделю, {name}</b>\n\n"
@@ -1923,6 +1984,7 @@ async def edit_weekly_plan(callback: CallbackQuery):
     )
     await callback.answer()
 
+
 @router.callback_query(F.data == "habits")
 async def habits(callback: CallbackQuery):
     """Цели и привычки"""
@@ -1930,7 +1992,7 @@ async def habits(callback: CallbackQuery):
     if not user:
         await callback.answer("Сначала используйте /start")
         return
-    
+
     name = user.get('name', 'друг')
     await callback.message.edit_text(
         f"🎯 <b>Цели и привычки, {name}</b>\n\n"
@@ -1948,6 +2010,7 @@ async def habits(callback: CallbackQuery):
     )
     await callback.answer()
 
+
 @router.callback_query(F.data == "referral_system")
 async def referral_system(callback: CallbackQuery):
     """Реферальная система с ограничением 5 приглашений в месяц"""
@@ -1955,20 +2018,20 @@ async def referral_system(callback: CallbackQuery):
     if not user:
         await callback.answer("Сначала используйте /start")
         return
-    
+
     referrals_list = await get_user_referrals(callback.from_user.id)
     name = user.get('name', 'друг')
-    
+
     # Получаем текущий месяц и год
     current_month = datetime.now().month
     current_year = datetime.now().year
-    
+
     # Фильтруем рефералов за текущий месяц
     monthly_referrals = [
-        r for r in referrals_list 
+        r for r in referrals_list
         if r['created_at'].month == current_month and r['created_at'].year == current_year
     ]
-    
+
     await callback.message.edit_text(
         f"💞 <b>Реферальная система, {name}</b>\n\n"
         f"👥 Всего приглашено друзей: {len(referrals_list)}\n"
@@ -1983,7 +2046,6 @@ async def referral_system(callback: CallbackQuery):
     )
     await callback.answer()
 
-# ... (код между функциями остается без изменений до функции psychology_menu)
 
 @router.callback_query(F.data == "psychology_menu")
 async def psychology_menu(callback: CallbackQuery):
@@ -1992,7 +2054,7 @@ async def psychology_menu(callback: CallbackQuery):
     if not user:
         await callback.answer("Сначала используйте /start")
         return
-    
+
     name = user.get('name', 'друг')
     await callback.message.edit_text(
         f"🧠 <b>Психологический раздел, {name}</b>\n\n"
@@ -2008,7 +2070,6 @@ async def psychology_menu(callback: CallbackQuery):
     )
     await callback.answer()
 
-# ... (код между функциями остается без изменений до функции habits)
 
 @router.callback_query(F.data == "habits")
 async def habits(callback: CallbackQuery):
@@ -2017,18 +2078,19 @@ async def habits(callback: CallbackQuery):
     if not user:
         await callback.answer("Сначала используйте /start")
         return
-    
+
     name = user.get('name', 'друг')
     user_habits = await get_user_habits(callback.from_user.id)
-    
+
     habits_text = ""
     if user_habits:
         habits_text = "\n\n<b>Ваши текущие привычки:</b>\n"
         for habit in user_habits[:5]:  # Показываем первые 5 привычек
             status = "✅" if habit.get('completed') else "⏳"
-            reminder = f"⏰ {habit['reminder_time']} ({habit['reminder_frequency']})" if habit.get('reminder_enabled') else ""
+            reminder = f"⏰ {habit['reminder_time']} ({habit['reminder_frequency']})" if habit.get(
+                'reminder_enabled') else ""
             habits_text += f"{status} {habit['title']} {reminder}\n"
-    
+
     await callback.message.edit_text(
         f"🎯 <b>Цели и привычки, {name}</b>\n\n"
         "Здесь вы можете работать над своими привычками и целями.\n"
@@ -2043,6 +2105,7 @@ async def habits(callback: CallbackQuery):
     )
     await callback.answer()
 
+
 @router.callback_query(F.data == "new_habit")
 async def new_habit(callback: CallbackQuery):
     """Создание новой привычки с настройкой напоминаний"""
@@ -2054,6 +2117,7 @@ async def new_habit(callback: CallbackQuery):
     )
     await callback.answer()
 
+
 class PromotionCreation(StatesGroup):
     waiting_for_title = State()
     waiting_for_description = State()
@@ -2064,10 +2128,66 @@ class PromotionCreation(StatesGroup):
     waiting_for_reward_type = State()
     waiting_for_tasks = State()
 
+class AdminStates(StatesGroup):
+    waiting_for_premium_username = State()
+    waiting_for_hearts_data = State()
+    waiting_for_ban_username = State()
+    waiting_for_promotion_title = State()
+    waiting_for_promotion_description = State()
+    waiting_for_promotion_reward = State()
+
+class UserStates(StatesGroup):
+    waiting_for_name = State()
+    waiting_for_habit_title = State()
+    waiting_for_habit_description = State()
+
+class Config:
+    TRIAL_DAYS = 3
+    TRIAL_DAILY_LIMIT = 12
+    PREMIUM_DAILY_LIMIT = 20
+    FREE_WEEKLY_LIMIT = 20
+    HEARTS_PER_DAY = 3
+    CHALLENGE_REWARD = 5
+    CHALLENGE_DURATION = 120
+    REFERRAL_REWARD = 10
+    MAX_REFERRALS_PER_MONTH = 5
+
 class HabitCreation(StatesGroup):
     waiting_for_title = State()
     waiting_for_description = State()
     waiting_for_time = State()
+
+
+class DatabaseUtils:
+    @staticmethod
+    async def get_user(telegram_id: int) -> Optional[Dict[str, Any]]:
+        """Получает пользователя из БД с обработкой ошибок"""
+        try:
+            async with async_session() as session:
+                result = await session.execute(
+                    text("SELECT * FROM users WHERE telegram_id = :telegram_id"),
+                    {"telegram_id": telegram_id}
+                )
+                user = result.mappings().first()
+                return dict(user) if user else None
+        except Exception as e:
+            logger.error(f"Error getting user {telegram_id}: {e}")
+            return None
+
+    @staticmethod
+    async def update_user(telegram_id: int, **kwargs) -> bool:
+        """Безопасное обновление пользователя"""
+        try:
+            async with async_session() as session:
+                stmt = users.update().where(users.c.telegram_id == telegram_id).values(**kwargs)
+                await session.execute(stmt)
+                await session.commit()
+                return True
+        except Exception as e:
+            logger.error(f"Error updating user {telegram_id}: {e}")
+            await session.rollback()
+            return False
+
 
 @router.callback_query(F.data == "create_habit")
 async def start_habit_creation(callback: CallbackQuery, state: FSMContext):
@@ -2075,17 +2195,21 @@ async def start_habit_creation(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_text("🧠 Введите название привычки")
     await callback.answer()
 
+
 @router.message(HabitCreation.waiting_for_title)
 async def habit_title_handler(message: Message, state: FSMContext):
     await state.update_data(title=message.text.strip())
     await state.set_state(HabitCreation.waiting_for_description)
-    await message.answer("📝 Теперь введите описание привычки.\nПример: Выполнять 10 отжиманий и 20 приседаний каждое утро")
+    await message.answer(
+        "📝 Теперь введите описание привычки.\nПример: Выполнять 10 отжиманий и 20 приседаний каждое утро")
+
 
 @router.message(HabitCreation.waiting_for_description)
 async def habit_description_handler(message: Message, state: FSMContext):
     await state.update_data(description=message.text.strip())
     await state.set_state(HabitCreation.waiting_for_time)
     await message.answer("⏰ Укажите время напоминания (в формате ЧЧ:ММ, например 08:30)")
+
 
 @router.message(HabitCreation.waiting_for_time)
 async def habit_time_handler(message: Message, state: FSMContext):
@@ -2096,24 +2220,25 @@ async def habit_time_handler(message: Message, state: FSMContext):
     await message.answer(f"✅ Привычка создана:\n{habit['title']} — {habit['description']} в {habit['time']}")
     await state.clear()
 
+
 @router.message(F.text & ~F.text.startswith('/'))
 async def handle_habit_description(message: Message):
     """Обработка описания привычки и предложение настроить напоминания"""
     user = await get_user(message.from_user.id)
     if not user or not user.get('temp_habit_title'):
         return
-    
+
     habit_description = message.text.strip()
     if len(habit_description) < 5:
         await message.answer("⚠️ Описание привычки должно содержать минимум 5 символов. Попробуйте еще раз:")
         return
-    
+
     # Сохраняем описание
     await update_user(
         message.from_user.id,
         temp_habit_description=habit_description
     )
-    
+
     # Предлагаем настроить напоминания
     await message.answer(
         "⏰ Хотите настроить напоминания для этой привычки?",
@@ -2122,6 +2247,7 @@ async def handle_habit_description(message: Message):
             [InlineKeyboardButton(text="❌ Нет", callback_data="create_habit_no_reminder")]
         ])
     )
+
 
 @router.callback_query(F.data == "set_habit_reminder")
 async def set_habit_reminder(callback: CallbackQuery):
@@ -2132,6 +2258,7 @@ async def set_habit_reminder(callback: CallbackQuery):
     )
     await callback.answer()
 
+
 @router.callback_query(F.data.startswith("habit_frequency_"))
 async def set_habit_frequency(callback: CallbackQuery):
     """Обработка выбора частоты напоминаний"""
@@ -2140,7 +2267,7 @@ async def set_habit_frequency(callback: CallbackQuery):
     if not user or not user.get('temp_habit_title'):
         await callback.answer("Ошибка: данные привычки не найдены")
         return
-    
+
     if frequency == "none":
         # Создаем привычку без напоминаний
         await create_habit(
@@ -2149,7 +2276,7 @@ async def set_habit_frequency(callback: CallbackQuery):
             description=user.get('temp_habit_description', ''),
             reminder_enabled=False
         )
-        
+
         await callback.message.edit_text(
             "🎉 Привычка создана без напоминаний!",
             reply_markup=get_back_to_habits_keyboard()
@@ -2160,12 +2287,13 @@ async def set_habit_frequency(callback: CallbackQuery):
             callback.from_user.id,
             temp_habit_frequency=frequency
         )
-        
+
         await callback.message.edit_text(
             "⏰ Введите время напоминания в формате ЧЧ:ММ (например, 09:00):"
         )
-    
+
     await callback.answer()
+
 
 @router.message(F.text.regexp(r'^\d{2}:\d{2}$'))
 async def handle_habit_reminder_time(message: Message):
@@ -2173,13 +2301,13 @@ async def handle_habit_reminder_time(message: Message):
     user = await get_user(message.from_user.id)
     if not user or not user.get('temp_habit_title'):
         return
-    
+
     try:
         # Проверяем корректность времени
         hours, minutes = map(int, message.text.split(':'))
         if not (0 <= hours < 24 and 0 <= minutes < 60):
             raise ValueError
-        
+
         # Создаем привычку с напоминанием
         habit = await create_habit(
             user_id=message.from_user.id,
@@ -2189,13 +2317,13 @@ async def handle_habit_reminder_time(message: Message):
             reminder_time=message.text,
             reminder_frequency=user.get('temp_habit_frequency', 'daily')
         )
-        
+
         if habit:
             await message.answer(
                 f"🎉 Привычка создана с напоминанием в {message.text} ({user.get('temp_habit_frequency', 'daily')})!",
                 reply_markup=get_back_to_habits_keyboard()
             )
-            
+
             # Очищаем временные данные
             await update_user(
                 message.from_user.id,
@@ -2205,9 +2333,10 @@ async def handle_habit_reminder_time(message: Message):
             )
         else:
             await message.answer("⚠️ Ошибка при создании привычки. Попробуйте позже.")
-    
+
     except ValueError:
         await message.answer("⚠️ Неверный формат времени. Введите время в формате ЧЧ:ММ (например, 09:00):")
+
 
 @router.callback_query(F.data == "habits_progress")
 async def habits_progress(callback: CallbackQuery):
@@ -2216,7 +2345,7 @@ async def habits_progress(callback: CallbackQuery):
     if not user:
         await callback.answer("Сначала используйте /start")
         return
-    
+
     habits = await get_user_habits(callback.from_user.id)
     if not habits:
         await callback.message.edit_text(
@@ -2229,28 +2358,29 @@ async def habits_progress(callback: CallbackQuery):
         )
         await callback.answer()
         return
-    
+
     # Группируем привычки по статусу
     completed = [h for h in habits if h.get('completed')]
     in_progress = [h for h in habits if not h.get('completed')]
-    
+
     text = "📊 <b>Ваш прогресс по привычкам:</b>\n\n"
     text += f"✅ <b>Выполнено:</b> {len(completed)}/{len(habits)}\n"
-    
+
     if completed:
         text += "\n<b>Последние выполненные:</b>\n"
         for habit in completed[:3]:
             date = habit['completed_at'].strftime("%d.%m") if habit.get('completed_at') else "??.??"
             text += f"- {habit['title']} ({date})\n"
-    
+
     if in_progress:
         text += "\n<b>В процессе:</b>\n"
         for habit in in_progress[:5]:
-            reminder = f"⏰ {habit['reminder_time']} ({habit['reminder_frequency']})" if habit.get('reminder_enabled') else ""
+            reminder = f"⏰ {habit['reminder_time']} ({habit['reminder_frequency']})" if habit.get(
+                'reminder_enabled') else ""
             text += f"- {habit['title']} {reminder}\n"
-    
+
     text += "\nПродолжайте в том же духе! 💪"
-    
+
     await callback.message.edit_text(
         text,
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
@@ -2259,6 +2389,7 @@ async def habits_progress(callback: CallbackQuery):
         parse_mode="HTML"
     )
     await callback.answer()
+
 
 # ... (код между функциями остается без изменений до функции meditations_menu)
 
@@ -2269,27 +2400,27 @@ async def meditations_menu(callback: CallbackQuery):
     if not user:
         await callback.answer("Сначала используйте /start")
         return
-    
+
     # Проверяем, сколько медитаций пользователь уже выполнил сегодня
     today = datetime.now().date()
     completed_today = 0
-    
+
     # Здесь должна быть логика подсчета выполненных сегодня медитаций
     # Временно используем заглушку
     if user.get('last_meditation_date'):
         last_date = user['last_meditation_date'].date()
         if last_date == today:
             completed_today = user.get('meditations_today', 0)
-    
+
     meditations_list = MEDITATIONS
-    
+
     text = (
         f"🧘‍♀️ <b>Медитации</b>\n\n"
         f"Выполнено сегодня: {completed_today}/3\n"
         "Каждая медитация длится 10 минут и приносит 20💖 за полное выполнение.\n\n"
         "<b>Доступные медитации:</b>\n"
     )
-    
+
     buttons = []
     for meditation in meditations_list:
         buttons.append([
@@ -2298,15 +2429,16 @@ async def meditations_menu(callback: CallbackQuery):
                 callback_data=f"view_meditation_{meditation['id']}"
             )
         ])
-    
+
     buttons.append([InlineKeyboardButton(text="🔙 Назад", callback_data="psychology_menu")])
-    
+
     await callback.message.edit_text(
         text,
         reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
         parse_mode="HTML"
     )
     await callback.answer()
+
 
 # ... (код между функциями остается без изменений до функции set_diary_password)
 
@@ -2317,7 +2449,7 @@ async def set_diary_password_handler(callback: CallbackQuery):
     if not user:
         await callback.answer("Сначала используйте /start")
         return
-    
+
     await callback.message.edit_text(
         "🔐 <b>Установка пароля на дневник</b>\n\n"
         "Введите новый пароль (минимум 6 символов):",
@@ -2325,13 +2457,34 @@ async def set_diary_password_handler(callback: CallbackQuery):
     )
     await callback.answer()
 
+
 @router.callback_query(F.data == "admin_premium")
-async def admin_activate_premium(callback: CallbackQuery):
+async def admin_activate_premium(callback: CallbackQuery, state: FSMContext):
+    """Активация премиума для пользователя"""
     await callback.message.edit_text("Введите @username пользователя для активации премиума:")
+    await state.set_state(AdminStates.waiting_for_premium_username)
     await callback.answer()
 
-    @router.message(F.from_user.id == callback.from_user.id)
-    async def activate_premium(message: Message):
+
+@router.message(F.text, StateFilter(AdminStates.waiting_for_premium_username))
+async def process_premium_username(message: Message, state: FSMContext):
+    """Обработка username для активации премиума"""
+    username = message.text.strip().replace("@", "")
+    user = await get_user_by_username(username)
+
+    if not user:
+        await message.answer("Пользователь не найден. Попробуйте еще раз:")
+        return
+
+    await update_user(user['telegram_id'],
+                      is_premium=True,
+                      subscription_expires_at=datetime.utcnow() + timedelta(days=30))
+    await message.answer(f"✅ Премиум активирован для @{username}")
+    await bot.send_message(user['telegram_id'], "🎉 Вам был активирован премиум-доступ на 30 дней!")
+    await state.clear()
+
+@router.message(F.from_user.id == callback.from_user.id)
+async def activate_premium(message: Message):
         username = message.text.strip()
         user = await get_user_by_username(username)  # Получаем пользователя по username
         if user:
@@ -2346,12 +2499,41 @@ async def admin_activate_premium(callback: CallbackQuery):
 
 
 @router.callback_query(F.data == "admin_hearts")
-async def admin_add_hearts(callback: CallbackQuery):
-    await callback.message.edit_text("Введите @username и количество сердечек (пример: @user 100):")
+async def admin_add_hearts(callback: CallbackQuery, state: FSMContext):
+    """Добавление сердечек пользователю"""
+    await callback.message.edit_text("Введите @username и количество сердечек через пробел (пример: username 100):")
+    await state.set_state(AdminStates.waiting_for_hearts_data)
     await callback.answer()
 
-    @router.message(F.from_user.id == callback.from_user.id)
-    async def add_hearts(message: Message):
+
+@router.message(F.text, StateFilter(AdminStates.waiting_for_hearts_data))
+async def process_hearts_data(message: Message, state: FSMContext):
+    """Обработка данных для добавления сердечек"""
+    try:
+        parts = message.text.strip().split()
+        if len(parts) != 2:
+            raise ValueError
+
+        username = parts[0].replace("@", "")
+        hearts = int(parts[1])
+
+        user = await get_user_by_username(username)
+        if not user:
+            await message.answer("Пользователь не найден. Попробуйте еще раз:")
+            return
+
+        new_hearts = user.get('hearts', 0) + hearts
+        await update_user(user['telegram_id'], hearts=new_hearts)
+        await message.answer(f"✅ Добавлено {hearts} сердечек пользователю @{username}")
+        await bot.send_message(user['telegram_id'],
+                               f"🎉 Вам было добавлено {hearts} сердечек! Теперь у вас {new_hearts} сердечек.")
+        await state.clear()
+
+    except (ValueError, IndexError):
+        await message.answer("Неверный формат. Введите @username и количество сердечек через пробел:")
+
+@router.message(F.from_user.id == callback.from_user.id)
+async def add_hearts(message: Message):
         parts = message.text.strip().split()
         if len(parts) != 2:
             await callback.message.edit_text("Неверный формат. Пример: @user 100")
@@ -2390,7 +2572,8 @@ async def show_admin_stats(callback: CallbackQuery):
 
         # Количество активных пользователей
         result = await session.execute(
-            text("SELECT COUNT(*) FROM users WHERE is_banned = FALSE AND (is_premium = TRUE OR trial_started_at IS NOT NULL)")
+            text(
+                "SELECT COUNT(*) FROM users WHERE is_banned = FALSE AND (is_premium = TRUE OR trial_started_at IS NOT NULL)")
         )
         active_users = result.scalar()
 
@@ -2458,6 +2641,7 @@ async def admin_user_history(callback: CallbackQuery):
         else:
             await callback.message.edit_text("Пользователь с таким username не найден.")
 
+
 @router.callback_query(F.data == "admin_reset_activity")
 async def admin_reset_data(callback: CallbackQuery):
     await callback.message.edit_text("Введите @username для сброса активности:")
@@ -2483,6 +2667,7 @@ async def admin_reset_data(callback: CallbackQuery):
         else:
             await callback.message.edit_text("Пользователь с таким username не найден.")
 
+
 @router.callback_query(F.data == "admin_ban")
 async def admin_ban_user(callback: CallbackQuery):
     await callback.message.edit_text("Введите @username пользователя, которого нужно заблокировать:")
@@ -2500,6 +2685,7 @@ async def admin_ban_user(callback: CallbackQuery):
             await callback.message.edit_text(f"Пользователь {username} был заблокирован.")
         else:
             await callback.message.edit_text("Пользователь с таким username не найден.")
+
 
 @router.callback_query(F.data == "admin_promotions")
 async def admin_promotions_menu(callback: CallbackQuery):
@@ -2524,6 +2710,7 @@ async def admin_promotions_menu(callback: CallbackQuery):
         parse_mode="HTML"
     )
     await callback.answer()
+
 
 @router.callback_query(F.data == "create_promotion")
 async def create_promotion_handler(callback: CallbackQuery, state: FSMContext):
@@ -2700,6 +2887,7 @@ async def process_reward_type(callback: CallbackQuery, state: FSMContext):
         )
     await callback.answer()
 
+
 @router.message(PromotionCreation.waiting_for_hearts)
 async def process_hearts_reward(message: Message, state: FSMContext):
     """Обработка награды в сердечках"""
@@ -2716,6 +2904,7 @@ async def process_hearts_reward(message: Message, state: FSMContext):
     except ValueError:
         await message.answer("⚠️ Введите корректное число сердечек (больше 0):")
 
+
 @router.message(PromotionCreation.waiting_for_discount)
 async def process_discount(message: Message, state: FSMContext):
     """Обработка скидки"""
@@ -2731,6 +2920,7 @@ async def process_discount(message: Message, state: FSMContext):
         )
     except ValueError:
         await message.answer("⚠️ Введите корректный процент скидки (от 1 до 100):")
+
 
 @router.message(PromotionCreation.waiting_for_end_date)
 async def process_end_date(message: Message, state: FSMContext):
@@ -2803,18 +2993,19 @@ async def process_tasks(message: Message, state: FSMContext):
 
     await state.clear()
 
+
 @router.message(F.text & ~F.text.startswith('/'))
 async def handle_diary_password(message: Message):
     """Обработка пароля для дневника (исправленная версия)"""
     user = await get_user(message.from_user.id)
     if not user:
         return
-    
+
     password = message.text.strip()
     if len(password) < 6:
         await message.answer("⚠️ Пароль должен содержать минимум 6 символов. Попробуйте еще раз:")
         return
-    
+
     try:
         async with async_session() as session:
             # Обновляем пароль для всех записей пользователя
@@ -2824,7 +3015,7 @@ async def handle_diary_password(message: Message):
                 .values(password=password)
             )
             await session.commit()
-        
+
         await message.answer(
             "🔐 Пароль успешно установлен! Теперь ваш дневник защищен.",
             reply_markup=get_diary_keyboard()
@@ -2832,6 +3023,7 @@ async def handle_diary_password(message: Message):
     except Exception as e:
         logger.error(f"Ошибка при установке пароля: {e}")
         await message.answer("⚠️ Произошла ошибка при установке пароля. Попробуйте позже.")
+
 
 # ... (код между функциями остается без изменений до функции create_diary_entry)
 
@@ -2848,7 +3040,7 @@ async def create_diary_entry(user_id: int, entry_text: str, mood: str = None):
                 )
             )
             await session.commit()
-            
+
             # Награждаем пользователя за запись в дневнике
             user = await get_user(user_id)
             if user:
@@ -2857,8 +3049,9 @@ async def create_diary_entry(user_id: int, entry_text: str, mood: str = None):
                 return True
     except Exception as e:
         logger.error(f"Ошибка при создании записи в дневнике: {e}")
-    
+
     return False
+
 
 # ... (код между функциями остается без изменений до функции get_diary_entries)
 
@@ -2867,7 +3060,7 @@ async def get_diary_entries(user_id: int, period: str = "all") -> List[Dict[str,
     try:
         async with async_session() as session:
             query = diary_entries.select().where(diary_entries.c.user_id == user_id)
-            
+
             now = datetime.utcnow()
             if period == "today":
                 today = now.date()
@@ -2878,14 +3071,15 @@ async def get_diary_entries(user_id: int, period: str = "all") -> List[Dict[str,
             elif period == "month":
                 month_ago = now - timedelta(days=30)
                 query = query.where(diary_entries.c.created_at >= month_ago)
-            
+
             query = query.order_by(diary_entries.c.created_at.desc())
-            
+
             result = await session.execute(query)
             return [dict(row) for row in result.mappings()]
     except Exception as e:
         logger.error(f"Ошибка при получении записей дневника: {e}")
         return []
+
 
 # ... (остальной код остается без изменений)
 
@@ -2913,6 +3107,7 @@ async def get_weekly_plan(user_id: int) -> Optional[Dict[str, Any]]:
         row = result.mappings().first()
         return dict(row) if row else None
 
+
 async def create_weekly_plan(user_id: int, goals: str):
     async with async_session() as session:
         today = datetime.utcnow()
@@ -2935,12 +3130,14 @@ def get_challenge_keyboard(challenge_id: str):
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
+
 def get_challenge_timer_keyboard():
     """Клавиатура с таймером челленджа"""
     buttons = [
         [InlineKeyboardButton(text="⏳ Завершить", callback_data="complete_challenge")]
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
+
 
 def get_shop_keyboard():
     """Клавиатура магазина"""
@@ -2949,6 +3146,7 @@ def get_shop_keyboard():
         buttons.append([InlineKeyboardButton(text=item["title"], callback_data=f"shop_{item['id']}")])
     buttons.append([InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_main")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
+
 
 def get_subscription_keyboard():
     """Клавиатура выбора подписки"""
@@ -2962,6 +3160,7 @@ def get_subscription_keyboard():
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
+
 def get_hearts_subscription_keyboard():
     """Клавиатура подписки за сердечки"""
     buttons = [
@@ -2972,6 +3171,7 @@ def get_hearts_subscription_keyboard():
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
+
 def get_payment_method_keyboard():
     """Клавиатура выбора способа оплаты"""
     buttons = [
@@ -2980,6 +3180,7 @@ def get_payment_method_keyboard():
         [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_subscription")]
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
+
 
 def get_admin_keyboard():
     """Клавиатура админа"""
@@ -2993,12 +3194,14 @@ def get_admin_keyboard():
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
+
 def get_back_to_shop_keyboard():
     """Клавиатура возврата в магазин"""
     buttons = [
         [InlineKeyboardButton(text="🔙 В магазин", callback_data="back_to_shop")]
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
+
 
 def get_psychology_menu_keyboard():
     """Клавиатура психологического раздела"""
@@ -3013,6 +3216,7 @@ def get_psychology_menu_keyboard():
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
+
 def get_diary_keyboard():
     """Клавиатура дневника"""
     buttons = [
@@ -3023,6 +3227,7 @@ def get_diary_keyboard():
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
+
 def get_meditation_keyboard(meditation_id: int):
     """Клавиатура медитации"""
     buttons = [
@@ -3032,8 +3237,8 @@ def get_meditation_keyboard(meditation_id: int):
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
-def get_referral_keyboard():
 
+def get_referral_keyboard():
     """Клавиатура реферальной системы"""
     buttons = [
         [InlineKeyboardButton(text="🔗 Получить реферальную ссылку", callback_data="get_referral_link")],
@@ -3041,6 +3246,7 @@ def get_referral_keyboard():
         [InlineKeyboardButton(text="🔙 Назад", callback_data="psychology_menu")]
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
+
 
 async def check_payments():
     """Фоновая задача для проверки платежей"""
@@ -3051,7 +3257,7 @@ async def check_payments():
                     text("SELECT * FROM payments WHERE status = 'pending'")
                 )
                 payments = result.mappings().all()
-                
+
                 for payment in payments:
                     if payment['payment_method'] == 'crypto':
                         verified = await check_crypto_payment(
@@ -3065,20 +3271,21 @@ async def check_payments():
                                 {"id": payment['id']}
                             )
                             await session.commit()
-        
+
         except Exception as e:
             logger.error(f"Ошибка в check_payments: {e}")
-        
+
         await asyncio.sleep(300)  # Проверка каждые 5 минут
+
 
 # --- Команды для пользователей ---
 @router.message(Command("start"))
-async def cmd_start(message: Message):
+async def cmd_start(message: Message, state: FSMContext):
     """Обработка команды /start"""
     try:
         await setup_db()
         user = await get_user(message.from_user.id)
-        
+
         if not user:
             is_admin = message.from_user.id in ADMIN_IDS
             user = await create_user(
@@ -3086,40 +3293,73 @@ async def cmd_start(message: Message):
                 full_name=message.from_user.full_name,
                 username=message.from_user.username,
                 is_admin=is_admin,
-                ip_address=message.from_user.id  # Число, а не строка
+                ip_address=message.from_user.id
             )
-            
+
             if is_admin:
                 await message.answer(
                     "👑 Добро пожаловать, администратор!\n\n"
                     "Используйте /admin для управления ботом")
                 return
-            
-            # Запрашиваем имя пользователя
+
+            await state.set_state(UserStates.waiting_for_name)
             await message.answer(
                 "🌿 Добро пожаловать в бота-психолога!\n\n"
-                "Я помогу вам с:\n"
-                "- Анализом настроения\n"
-                "- Медитациями и релаксацией\n"
-                "- Ведением дневника\n"
-                "- Психологической поддержкой\n\n"
-                "📌 Лимиты использования:\n"
-                f"- Пробный период: {TRIAL_DAYS} дня\n"
-                f"- Запросов в день: {TRIAL_DAILY_LIMIT}\n"
-                f"- Сердечек в день: {HEARTS_PER_DAY}\n\n"
-                "Как вас зовут? Напишите свое имя для персонализации:")
+                "Как вас зовут? Введите ваше имя для персонализации:")
             return
-        
-        # Если пользователь уже есть, но имя не указано
-        if not user.get('name'):
-            await message.answer("Пожалуйста, введите ваше имя для продолжения:")
-            return
-            
+
         await show_main_menu(message.from_user.id, message)
-    
+
     except Exception as e:
         logger.error(f"Ошибка в обработчике /start: {e}", exc_info=True)
         await message.answer("Произошла ошибка. Пожалуйста, попробуйте позже.")
+
+
+@router.message(F.text, StateFilter(UserStates.waiting_for_name))
+async def process_user_name(message: Message, state: FSMContext):
+    """Обработка ввода имени пользователя"""
+    name = message.text.strip()
+    if len(name) < 2:
+        await message.answer("Имя должно содержать минимум 2 символа. Попробуйте еще раз:")
+        return
+
+    await update_user(message.from_user.id, name=name)
+    await state.clear()
+    await message.answer(
+        f"✨ Отлично, {name}! Теперь вы можете пользоваться всеми функциями бота.",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🧠 Психология", callback_data="psychology_menu")],
+            [InlineKeyboardButton(text="👤 Профиль", callback_data="profile")]
+        )
+    )
+
+@router.message(F.text & ~F.command)
+async def handle_text_message(message: Message):
+    """Обработка текстовых сообщений (включая имя пользователя)"""
+    user = await get_user(message.from_user.id)
+    if not user:
+        await message.answer("Сначала используйте /start")
+        return
+
+    # Если имя еще не установлено
+    if not user.get('name'):
+        name = message.text.strip()
+        if len(name) < 2:
+            await message.answer("⚠️ Имя должно содержать минимум 2 символа. Попробуйте еще раз:")
+            return
+
+        await update_user(message.from_user.id, name=name)
+        await message.answer(
+            f"✨ Отлично, {name}! Теперь вы можете пользоваться всеми функциями бота.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🧠 Психология", callback_data="psychology_menu")],
+                [InlineKeyboardButton(text="👤 Профиль", callback_data="profile")]
+            )
+        )
+        return
+
+    # Обработка других текстовых сообщений
+    await message.answer("Я не понимаю текстовые сообщения. Используйте кнопки меню.")
 
 async def show_main_menu(user_id: int, message: Message):
     """Показывает главное меню с учетом прав пользователя"""
@@ -3127,17 +3367,15 @@ async def show_main_menu(user_id: int, message: Message):
     if not user:
         await message.answer("Сначала используйте /start")
         return
-    
+
     name = user.get('name', 'друг')
-    
+
     if user.get('is_admin'):
-        # Меню для администратора
         await message.answer(
             f"👑 Админ-панель, {name}",
             reply_markup=get_admin_keyboard()
         )
     else:
-        # Меню для обычного пользователя
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="👤 Профиль", callback_data="profile")],
             [InlineKeyboardButton(text="🧠 Психология", callback_data="psychology_menu")],
@@ -3145,11 +3383,12 @@ async def show_main_menu(user_id: int, message: Message):
             [InlineKeyboardButton(text="🏆 Челленджи", callback_data="get_challenge")],
             [InlineKeyboardButton(text="🛍 Магазин", callback_data="shop")]
         ])
-        
+
         await message.answer(
             f"Привет, {name}!\n\nВыберите раздел:",
             reply_markup=keyboard
         )
+
 
 async def check_reminders():
     """Проверка и отправка напоминаний"""
@@ -3162,7 +3401,7 @@ async def check_reminders():
                     {"now": now}
                 )
                 reminders = result.mappings().all()
-                
+
                 for reminder in reminders:
                     habit = await get_habit(reminder['user_id'], reminder['habit_id'])
                     if habit:
@@ -3170,7 +3409,7 @@ async def check_reminders():
                             reminder['user_id'],
                             f"⏰ Напоминание: {habit['title']}\n{habit['description']}"
                         )
-                    
+
                     # Обновляем следующее напоминание
                     if reminder['frequency'] == "daily":
                         next_reminder = now + timedelta(days=1)
@@ -3178,22 +3417,38 @@ async def check_reminders():
                         next_reminder = now + timedelta(weeks=1)
                     elif reminder['frequency'] == "monthly":
                         next_reminder = now + timedelta(days=30)
-                    
+
                     await session.execute(
                         text("UPDATE reminders SET next_reminder = :next WHERE id = :id"),
                         {"next": next_reminder, "id": reminder['id']}
                     )
                     await session.commit()
-        
+
         except Exception as e:
             logger.error(f"Ошибка в check_reminders: {e}")
-        
+
         await asyncio.sleep(60)  # Проверка каждую минуту
+
+
+async def on_startup(dp: Dispatcher):
+    """Действия при запуске бота"""
+    await bot.set_my_commands([
+        BotCommand(command="start", description="Запустить бота"),
+        BotCommand(command="profile", description="Ваш профиль"),
+        BotCommand(command="psychology", description="Психологическая помощь"),
+        BotCommand(command="admin", description="Админ-панель")
+    ])
+
+    # Запуск фоновых задач
+    asyncio.create_task(check_payments())
+    asyncio.create_task(check_reminders())
+
 
 if __name__ == "__main__":
     async def main():
-        await setup_db()
+        await on_startup(dp)
         logger.info("🚀 Бот запущен!")
         await dp.start_polling(bot)
+
 
     asyncio.run(main())
