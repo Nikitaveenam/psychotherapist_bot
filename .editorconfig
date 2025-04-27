@@ -1,38 +1,23 @@
-# Top-most config (stop searching in parent directories)
+# EditorConfig помогает поддерживать единый стиль кодирования
+
 root = true
 
-# Universal settings for all files
+# Настройки по умолчанию для всех файлов
 [*]
 charset = utf-8
 end_of_line = lf
+insert_final_newline = true
 indent_style = space
 indent_size = 4
 trim_trailing_whitespace = true
-insert_final_newline = true
 
-# Python specific
+# Специальные настройки для Python файлов
 [*.py]
-max_line_length = 120
-continuation_indent = 8  # For wrapped lines
+max_line_length = 88
+indent_style = space
+indent_size = 4
 
-# Markdown files
-[*.md]
-trim_trailing_whitespace = false  # Preserve trailing spaces for markdown syntax
-insert_final_newline = true
-
-# Web files (HTML/JS/TS)
-[*.{html,js,ts}]
+# Специальные настройки для JSON, YAML и TOML файлов
+[*.{json,yml,yaml,toml}]
+indent_style = space
 indent_size = 2
-max_line_length = 120
-
-# YAML configs
-[*.{yml,yaml}]
-indent_size = 2
-
-# JSON files
-[*.json]
-indent_size = 2
-
-# Makefiles require tabs
-[Makefile]
-indent_style = tab
