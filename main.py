@@ -4,16 +4,22 @@ import asyncio
 import random
 import httpx
 import hashlib
+import pytz
+import aiocron
 from typing import Optional, Dict, Any, List
 from datetime import datetime, timedelta, timezone
+from datetime import time
 from decimal import Decimal, getcontext
 from dotenv import load_dotenv
 
-from aiogram import Bot, Dispatcher, Router, F, html
+from aiogram import Bot, Dispatcher, Router, F, html, types
 from aiogram.types import (
     Message, CallbackQuery, InlineKeyboardButton, 
     InlineKeyboardMarkup, BotCommand, ErrorEvent
 )
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
+from aiogram.types import ReplyKeyboardRemove
+from aiogram.types import Message
 from aiogram.client.default import DefaultBotProperties
 from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
@@ -24,6 +30,7 @@ from aiogram.utils.markdown import hide_link
 from sqlalchemy import text, MetaData, Table, Column, Integer, String, Boolean, DateTime, BigInteger, Float
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import declarative_base
+from sqlalchemy.sql import func
 
 # --- Configuration ---
 load_dotenv()
@@ -42,6 +49,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+logging.basicConfig(level=logging.DEBUG)  # в начале main.py
 # --- States ---
 class UserStates(StatesGroup):
     waiting_for_name = State()
@@ -398,27 +406,28 @@ users = Table(
     "users",
     metadata,
     Column("id", Integer, primary_key=True),
-    Column("telegram_id", BigInteger, unique=True, nullable=False),
+    Column("telegram_id", BigInteger, unique=True, nullable=False, index=True),
     Column("full_name", String(100)),
     Column("username", String(100)),
     Column("gender", String(10)),
     Column("is_premium", Boolean, default=False),
     Column("hearts", Integer, default=Config.HEARTS_PER_DAY),
     Column("is_admin", Boolean, default=False),
-    Column("trial_started_at", DateTime),
-    Column("subscription_expires_at", DateTime),
-    Column("created_at", DateTime, default=datetime.utcnow),
-    Column("last_activity_at", DateTime, default=datetime.utcnow),
+    Column("trial_started_at", DateTime(timezone=False)),
+    Column("subscription_expires_at", DateTime(timezone=False)),
+    Column("created_at", DateTime(timezone=False), server_default=func.now()),
+    Column("last_activity_at", DateTime(timezone=False), onupdate=func.now()),
+    Column("last_limit_reset", DateTime(timezone=False)),
     Column("is_banned", Boolean, default=False),
     Column("name", String(100), nullable=True),
     Column("diary_password", String(100), nullable=True),
     Column("daily_requests", Integer, default=0),
     Column("total_requests", Integer, default=0),
-    Column("last_diary_reward", DateTime),
-    Column("referral_code", String(20), unique=True),
+    Column("last_diary_reward", DateTime(timezone=False)),
+    Column("referral_code", String(20), unique=True, index=True),
     Column("referrer_id", BigInteger),
     Column("referrals_count", Integer, default=0),
-    Column("last_referral_date", DateTime),
+    Column("last_referral_date", DateTime(timezone=False)),
     Column("ip_address", String(45))
 )
 
@@ -554,28 +563,68 @@ async def update_user(telegram_id: int, **kwargs) -> bool:
         logger.error(f"Error updating user: {e}")
         return False
 
-async def create_user(telegram_id: int, full_name: str, username: str = None, is_admin: bool = False, referrer_id: int = None) -> Dict[str, Any]:
-    """Create new user"""
+async def create_user(
+    telegram_id: int, 
+    full_name: str, 
+    username: str = None, 
+    name: str = None,
+    ip_address: str = "unknown",
+    is_admin: bool = False, 
+    referrer_id: int = None
+):
+    """Create new user with all required fields"""
+    # Валидация входных данных
+    if not isinstance(telegram_id, int) or telegram_id <= 0:
+        raise ValueError("Invalid telegram_id: must be positive integer")
+    
+    if not full_name or not isinstance(full_name, str):
+        raise ValueError("Invalid full_name: must be non-empty string")
+    
+    if username is not None and not isinstance(username, str):
+        raise ValueError("Invalid username: must be string or None")
+    
     try:
-        async with async_session() as session:
-            # Generate referral code
-            referral_code = hashlib.sha256(f"{telegram_id}{datetime.utcnow().timestamp()}".encode()).hexdigest()[:8]
-            
-            user_data = {
-                "telegram_id": telegram_id,
-                "full_name": full_name,
-                "username": username,
-                "is_admin": is_admin,
-                "trial_started_at": datetime.utcnow() if not is_admin else None,
-                "created_at": datetime.utcnow(),
-                "referral_code": referral_code,
-                "referrer_id": referrer_id
-            }
+        # Generate name if not provided
+        if not name:
+            name = (
+                full_name.split()[0] 
+                if full_name 
+                else f"User{telegram_id % 10000}"  # Fallback with ID
+            )
+        
+        # Generate unique referral code
+        referral_code = hashlib.sha256(
+            f"{telegram_id}{datetime.now(timezone.utc).timestamp()}".encode()
+        ).hexdigest()[:8]
+        
+        # Prepare user data
+        user_data = {
+            "telegram_id": telegram_id,
+            "full_name": full_name,
+            "username": username,
+            "name": name,
+            "is_admin": is_admin,
+            "is_banned": False,
+            "hearts": Config.HEARTS_PER_DAY if not is_admin else 0,
+            "trial_started_at": datetime.now(timezone.utc) if not is_admin else None,
+            "subscription_expires_at": None,
+            "created_at": datetime.now(timezone.utc),
+            "last_activity_at": datetime.now(timezone.utc),
+            "referral_code": referral_code,
+            "referrer_id": referrer_id,
+            "referrals_count": 0,
+            "ip_address": ip_address,
+            "daily_requests": 0,
+            "total_requests": 0
+        }
 
+        async with async_session() as session:
+            # Insert new user and return created record
             result = await session.execute(
                 users.insert().values(**user_data).returning(users)
             )
             await session.commit()
+            
             user = dict(result.mappings().first())
             
             # Apply referral rewards if applicable
@@ -583,9 +632,10 @@ async def create_user(telegram_id: int, full_name: str, username: str = None, is
                 await apply_referral_rewards(referrer_id, telegram_id)
             
             return user
+            
     except Exception as e:
-        logger.error(f"Error creating user: {e}")
-        raise
+        logger.error(f"Error creating user {telegram_id}: {e}")
+        raise RuntimeError("Failed to create user") from e
 
 async def create_diary_entry(user_id: int, entry_text: str, mood: str = None):
     """Создает запись в дневнике"""
@@ -679,6 +729,14 @@ async def save_wheel_balance(user_id: int, scores: Dict[str, int]):
     except Exception as e:
         logger.error(f"Error saving wheel balance: {e}")
         return False
+    
+async def ask_for_name(message: Message):
+    markup = ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text="❌ Отмена")]],
+        resize_keyboard=True
+    )
+    await message.answer("Введите ваше имя:", reply_markup=markup)
+    await state.set_state(UserStates.waiting_for_name)
     
 async def apply_referral_rewards(referrer_id: int, new_user_id: int):
     """Apply rewards for referral"""
@@ -886,19 +944,20 @@ def get_main_menu_keyboard(user_id: Optional[int] = None):
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 def get_admin_keyboard():
-    """Полная клавиатура администратора"""
-    buttons = [
-        [InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats"),
-         InlineKeyboardButton(text="👥 Пользователи", callback_data="admin_users")],
-        [InlineKeyboardButton(text="💎 Выдать премиум", callback_data="admin_premium"),
-         InlineKeyboardButton(text="💖 Начислить сердца", callback_data="admin_hearts")],
-        [InlineKeyboardButton(text="🚫 Забанить", callback_data="admin_ban"),
-         InlineKeyboardButton(text="✅ Разбанить", callback_data="admin_unban")],
+    """Генерация клавиатуры администратора"""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="👤 Найти пользователя", callback_data="admin_find_user"),
+         InlineKeyboardButton(text="💎 Выдать премиум", callback_data="admin_premium")],
+        [InlineKeyboardButton(text="💖 Начислить сердца", callback_data="admin_hearts"),
+         InlineKeyboardButton(text="🚫 Забанить", callback_data="admin_ban")],
         [InlineKeyboardButton(text="📝 Создать задание", callback_data="admin_create_task"),
          InlineKeyboardButton(text="🎁 Создать промо", callback_data="admin_create_promo")],
-        [InlineKeyboardButton(text="🏠 В главное меню", callback_data="back_to_main")]
-    ]
-    return InlineKeyboardMarkup(inline_keyboard=buttons)
+        [InlineKeyboardButton(text="📊 Полная статистика", callback_data="admin_stats"),
+         InlineKeyboardButton(text="📈 Аналитика", callback_data="admin_analytics")],
+        [InlineKeyboardButton(text="⚙️ Настройки", callback_data="admin_settings"),
+         InlineKeyboardButton(text="📦 Бэкап данных", callback_data="admin_backup")],
+        [InlineKeyboardButton(text="🏠 Главное меню", callback_data="back_to_main")]
+    ])
 
 def get_gender_keyboard():
     """Gender selection keyboard"""
@@ -1019,134 +1078,194 @@ def get_payment_methods_keyboard(item_id: str):
 # --- Handlers ---
 @router.message(Command("start"))
 async def cmd_start(message: Message, state: FSMContext):
-    """Handle /start command with new onboarding flow"""
+    """Обработчик команды /start с улучшенным онбордингом"""
     try:
-        # Обновляем last_activity_at при каждом старте
-        await update_user(message.from_user.id, last_activity_at=datetime.utcnow())
+        # Получаем IP-адрес (временно используем ID как пример)
+        ip_address = str(message.from_user.id)  # Преобразуем в строку для VARCHAR поля
+        
+        # Устанавливаем время последней активности (без часового пояса)
+        await update_user(
+            message.from_user.id,
+            last_activity_at=datetime.now(timezone.utc).replace(tzinfo=None),
+            ip_address=ip_address
+        )
         
         loading_msg = await message.answer("🔄 Загрузка настроения...")
-        
-        # Check if user exists
         user = await get_user(message.from_user.id)
         
         if not user:
-            # New user flow
+            # Новый пользователь
             await bot.delete_message(chat_id=message.chat.id, message_id=loading_msg.message_id)
             
-            # Send bot introduction
-            intro_text = (
-                f"{hide_link('https://example.com/bot-preview.jpg')}"
-                "🌟 <b>Добро пожаловать в MindHelper — вашего персонального психологического помощника!</b>\n\n"
-                "Я использую передовую технологию GPT-4o, чтобы помочь вам:\n"
-                "• Разобраться в своих эмоциях и мыслях\n"
-                "• Развить полезные привычки\n"
-                "• Улучшить качество жизни\n"
-                "• Найти баланс во всех сферах\n\n"
-                "📌 <b>Основные функции:</b>\n"
-                "🧠 <i>Психологические тесты и анализы</i>\n"
-                "📔 <i>Личный дневник с анализом</i>\n"
-                "✅ <i>Трекер привычек и целей</i>\n"
-                "🎯 <i>Ежедневные задания</i>\n"
-                "💎 <i>Премиум-функции</i>\n\n"
-                "<b>⚠️ Важно:</b> Я не заменяю профессионального психолога. "
-                "В кризисных ситуациях обратитесь к специалисту.\n\n"
-                "Для начала, укажите ваш пол:"
-            )
+            try:
+                # Создаем пользователя с валидацией данных
+                user = await create_user(
+                    telegram_id=message.from_user.id,
+                    full_name=message.from_user.full_name or "",
+                    username=message.from_user.username,
+                    name=message.from_user.first_name or None,
+                    ip_address=ip_address
+                )
+            except ValueError as e:
+                await message.answer("⚠️ Ошибка в данных. Пожалуйста, попробуйте еще раз.")
+                logger.error(f"Validation error: {e}")
+                return
+            except Exception as e:
+                await message.answer("🚫 Не удалось создать аккаунт. Попробуйте позже.")
+                logger.error(f"Create user error: {e}")
+                return
             
-            await message.answer(
-                intro_text,
-                reply_markup=get_gender_keyboard()
-            )
-            await state.set_state(UserStates.waiting_for_gender)
+            # Запрашиваем имя, если оно не было установлено
+            if not user.get('name'):
+                intro_text = (
+                    f"{hide_link('https://example.com/bot-preview.jpg')}"
+                    "🌟 <b>Добро пожаловать в MindHelper!</b>\n\n"
+                    "Как мне к вам обращаться? Введите ваше имя:"
+                )
+                await message.answer(intro_text, 
+                                  parse_mode="HTML",
+                                  reply_markup=ReplyKeyboardRemove())
+                await state.set_state(UserStates.waiting_for_name)
+            else:
+                await show_main_menu(message.from_user.id, message)
         else:
-            # Existing user
+            # Существующий пользователь
             await bot.delete_message(chat_id=message.chat.id, message_id=loading_msg.message_id)
-            await show_main_menu(message.from_user.id, message)
             
+            if not user.get('name'):
+                await message.answer(
+                    "👋 С возвращением! Как мне к вам обращаться? Введите ваше имя:",
+                    reply_markup=ReplyKeyboardRemove()
+                )
+                await state.set_state(UserStates.waiting_for_name)
+            else:
+                if message.from_user.id in ADMIN_IDS:
+                    await show_admin_menu(message.from_user.id, message)
+                else:
+                    await show_main_menu(message.from_user.id, message)
+                
     except Exception as e:
-        logger.error(f"Error in /start handler: {e}")
-        await message.answer("Произошла ошибка. Пожалуйста, попробуйте позже.")
+        logger.error(f"Error in /start handler: {e}", exc_info=True)
+        try:
+            await message.answer(
+                "⚠️ Произошла ошибка. Пожалуйста, попробуйте позже.\n"
+                "Если проблема сохраняется, обратитесь в поддержку.",
+                reply_markup=ReplyKeyboardRemove()
+            )
+        except Exception as send_error:
+            logger.error(f"Failed to send error message: {send_error}")
 
 @router.message(StateFilter(UserStates.waiting_for_name))
 async def process_user_name(message: Message, state: FSMContext):
     """Обработка ввода имени пользователя"""
-    name = message.text.strip()
-    if len(name) < 2:
-        await message.answer("Имя должно содержать минимум 2 символа. Попробуйте еще раз:")
-        return
+    try:
+        name = message.text.strip()
+        if len(name) < 2:
+            await message.answer("Имя должно содержать минимум 2 символа. Попробуйте еще раз:")
+            return
 
-    await update_user(message.from_user.id, name=name)
-    await state.clear()
-    
-    await message.answer(
-        f"✨ Отлично, {name}! Теперь вы можете пользоваться всеми функциями бота.",
-        reply_markup=get_main_menu_keyboard()
-    )
+        # Сохраняем имя и другие данные
+        await update_user(
+            message.from_user.id,
+            name=name,
+            last_activity_at=datetime.now(timezone.utc)
+        )
+        
+        await state.clear()
+        
+        # Для новых пользователей продолжаем onboarding
+        user = await get_user(message.from_user.id)
+        if not user.get('gender'):
+            await message.answer(
+                "Отлично! Теперь укажите ваш пол:",
+                reply_markup=get_gender_keyboard()
+            )
+            await state.set_state(UserStates.waiting_for_gender)
+        else:
+            await message.answer(
+                f"✨ Отлично, {name}! Теперь вы можете пользоваться всеми функциями бота.",
+                reply_markup=get_main_menu_keyboard()
+            )
+            
+    except Exception as e:
+        logger.error(f"Error in name handler: {e}")
+        await message.answer("Произошла ошибка. Пожалуйста, попробуйте еще раз.")
 
 async def show_main_menu(user_id: int, message: Message):
     """Показывает главное меню с полным доступом ко всем функциям"""
-    user = await get_user(user_id)
-    if not user:
-        await message.answer("Сначала используйте /start")
-        return
+    try:
+        user = await get_user(user_id)
+        if not user:
+            await message.answer("Сначала используйте /start")
+            return
 
-    name = user.get('name', 'друг')
-    time_of_day = "доброе утро" if 5 <= datetime.now().hour < 12 else \
-                 "добрый день" if 12 <= datetime.now().hour < 18 else \
-                 "добрый вечер" if 18 <= datetime.now().hour < 23 else \
-                 "доброй ночи"
-
-    # Проверка бана
-    if user.get('is_banned'):
-        await message.answer(f"⛔ {name}, ваш аккаунт заблокирован.")
-        return
-
-    # Админ-панель
-    if user.get('is_admin'):
-        # Получаем статистику для админа
-        async with async_session() as session:
-            total_users = (await session.execute(text("SELECT COUNT(*) FROM users"))).scalar()
-            active_today = (await session.execute(text(
-                "SELECT COUNT(*) FROM users WHERE created_at >= CURRENT_DATE"
-            ))).scalar()
-
-        admin_text = (
-            f"👑 {time_of_day.capitalize()}, {name} (Админ)\n\n"
-            f"📊 Пользователей: {total_users}\n"
-            f"🟢 Активных сегодня: {active_today}\n\n"
-            "Админ-панель:"
+        # Получаем имя или используем стандартное обращение
+        name = user.get('name') or (
+            user.get('full_name', '').split()[0] or 
+            user.get('username', 'друг')
         )
 
-        await message.answer(
-            admin_text,
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                # Управление пользователями
-                [InlineKeyboardButton(text="👤 Найти пользователя", callback_data="admin_find_user"),
-                 InlineKeyboardButton(text="💎 Выдать премиум", callback_data="admin_premium")],
-                [InlineKeyboardButton(text="💖 Начислить сердца", callback_data="admin_hearts"),
-                 InlineKeyboardButton(text="🚫 Забанить", callback_data="admin_ban")],
-                # Управление контентом
-                [InlineKeyboardButton(text="📝 Создать задание", callback_data="admin_create_task"),
-                 InlineKeyboardButton(text="🎁 Создать промо", callback_data="admin_create_promo")],
-                # Аналитика
-                [InlineKeyboardButton(text="📊 Полная статистика", callback_data="admin_stats"),
-                 InlineKeyboardButton(text="📈 Аналитика", callback_data="admin_analytics")],
-                # Система
-                [InlineKeyboardButton(text="⚙️ Настройки", callback_data="admin_settings"),
-                 InlineKeyboardButton(text="📦 Бэкап данных", callback_data="admin_backup")],
-                [InlineKeyboardButton(text="🏠 Главное меню", callback_data="back_to_main")]
-            ])
-        )
-        return
+        time_of_day = get_time_of_day_greeting()
 
-    # Меню для обычного пользователя
-    account_status = await get_user_account_status(user_id)
-    status_icon = "💎" if account_status == "premium" else \
-                 "🟢" if account_status == "trial" else \
-                 "🔹"
+        # Проверка бана
+        if user.get('is_banned'):
+            await message.answer(f"⛔ {name}, ваш аккаунт заблокирован.")
+            return
+
+        # Админ-панель
+        if user.get('is_admin'):
+            await show_admin_menu(user, name, time_of_day, message)
+            return
+
+        # Меню для обычного пользователя
+        await show_regular_user_menu(user, name, time_of_day, message)
+
+    except Exception as e:
+        logger.error(f"Error in show_main_menu: {e}")
+        await message.answer("Произошла ошибка. Пожалуйста, попробуйте позже.")
+
+def get_time_of_day_greeting():
+    """Возвращает приветствие в зависимости от времени суток"""
+    hour = datetime.now().hour
+    if 5 <= hour < 12:
+        return "доброе утро"
+    elif 12 <= hour < 18:
+        return "добрый день"
+    elif 18 <= hour < 23:
+        return "добрый вечер"
+    return "доброй ночи"
+
+async def show_admin_menu(user: dict, name: str, greeting: str, message: Message):
+    """Показывает меню администратора"""
+    async with async_session() as session:
+        total_users = (await session.execute(text("SELECT COUNT(*) FROM users"))).scalar()
+        active_today = (await session.execute(text(
+            "SELECT COUNT(*) FROM users WHERE created_at >= CURRENT_DATE"
+        ))).scalar()
+
+    admin_text = (
+        f"👑 {greeting.capitalize()}, {name} (Админ)\n\n"
+        f"📊 Пользователей: {total_users}\n"
+        f"🟢 Активных сегодня: {active_today}\n\n"
+        "Админ-панель:"
+    )
+
+    await message.answer(
+        admin_text,
+        reply_markup=get_admin_keyboard()
+    )
+
+async def show_regular_user_menu(user: dict, name: str, greeting: str, message: Message):
+    """Показывает меню обычного пользователя"""
+    account_status = await get_user_account_status(user['telegram_id'])
+    status_icon = {
+        "premium": "💎",
+        "trial": "🟢",
+        "free": "🔹"
+    }.get(account_status, "🔹")
 
     main_menu_text = (
-        f"{time_of_day.capitalize()}, {name}! {status_icon}\n\n"
+        f"{greeting.capitalize()}, {name}! {status_icon}\n\n"
         f"💖 Баланс: {user.get('hearts', 0)}\n"
         f"📅 В системе с: {user['created_at'].strftime('%d.%m.%Y')}\n\n"
         "Выберите раздел:"
@@ -1154,7 +1273,7 @@ async def show_main_menu(user_id: int, message: Message):
 
     await message.answer(
         main_menu_text,
-        reply_markup=get_main_menu_keyboard(user_id)
+        reply_markup=get_main_menu_keyboard(user['telegram_id'])
     )
         
 @router.callback_query(F.data.startswith("gender_"))
@@ -2032,7 +2151,7 @@ async def admin_panel(message: Message):
         # Pending payments
         result = await session.execute(
             text("""
-                SELECT p.id, u.username, p.amount, p.currency, p.item_id 
+                SELECT p.id, u.username, p.amount, p.currency, p.item_id
                 FROM payments p
                 JOIN users u ON p.user_id = u.telegram_id
                 WHERE p.status = 'pending'
@@ -2221,6 +2340,15 @@ async def confirm_payment(callback: CallbackQuery):
         await callback.answer(f"Платеж {payment_id} подтвержден")
         await admin_confirm_payments(callback)  # Refresh list
         
+@router.message(F.text == "❌ Отмена", UserStates.waiting_for_name)
+async def cancel_name_input(message: Message, state: FSMContext):
+    await state.clear()
+    await message.answer(
+        "Хорошо, вы всегда можете установить имя позже.",
+        reply_markup=ReplyKeyboardRemove()
+    )
+    await show_main_menu(message.from_user.id, message)
+    
 @router.message(F.photo)
 async def handle_payment_proof(message: Message):
     """Handle payment proof photos"""
@@ -2355,6 +2483,15 @@ async def pay_with_yoomoney(callback: CallbackQuery):
         parse_mode="HTML"
     )
     await callback.answer()
+    
+async def show_admin_menu(user_id: int, message: Message):
+    user = await get_user(user_id)
+    name = user.get('name', 'администратор')
+    
+    await message.answer(
+        f"👑 Добро пожаловать, {name} (Админ)!",
+        reply_markup=get_admin_keyboard()
+    )
     
 @router.callback_query(F.data == "admin_premium")
 async def admin_premium_handler(callback: CallbackQuery, state: FSMContext):
@@ -2548,36 +2685,57 @@ async def process_admin_premium(message: Message, state: FSMContext):
     
     await state.clear()
 
-# ... [other admin handlers]
-
 # --- Background tasks ---
 async def reset_daily_limits():
-    """Reset daily request limits"""
+    """Сброс лимитов ежедневно в 19:00 по МСК"""
     while True:
         try:
-            now = datetime.utcnow()
+            from datetime import datetime, timedelta
+            import pytz  # Установите через: pip install pytz
+            
+            # Устанавливаем московский часовой пояс
+            msk_tz = pytz.timezone('Europe/Moscow')
+            
+            # Текущее время в МСК
+            now_msk = datetime.now(msk_tz)
+            
+            # Вычисляем время следующего сброса (сегодня или завтра в 19:00 МСК)
+            next_reset = msk_tz.localize(
+                datetime.combine(
+                    now_msk.date(),
+                    time(19, 0)  # 19:00 МСК
+            ))
+            
+            # Если сегодня 19:00 уже прошло, берём завтра
+            if now_msk >= next_reset:
+                next_reset += timedelta(days=1)
+            
+            # Ждём до времени сброса
+            sleep_seconds = (next_reset - now_msk).total_seconds()
+            logger.info(f"⏳ Следующий сброс лимитов в {next_reset.strftime('%d.%m.%Y %H:%M:%S %Z')}")
+            await asyncio.sleep(sleep_seconds)
+            
+            # Выполняем сброс
             async with async_session() as session:
-                # Reset daily requests for all users
                 await session.execute(
                     text("UPDATE users SET daily_requests = 0")
                 )
                 await session.commit()
                 
-                logger.info(f"Reset daily requests at {now}")
-                
+            logger.info(f"✅ Лимиты сброшены в {datetime.now(msk_tz).strftime('%d.%m.%Y %H:%M:%S %Z')}")
+            
         except Exception as e:
-            logger.error(f"Error in reset_daily_limits: {e}")
-        
-        # Run once per day at midnight UTC
-        await asyncio.sleep(24 * 60 * 60)
+            logger.error(f"⚠️ Ошибка сброса лимитов: {e}", exc_info=True)
+            await asyncio.sleep(60)  # Пауза при ошибке
 
 async def check_subscriptions():
     """Check and update expired subscriptions"""
     while True:
         try:
-            now = datetime.utcnow()
+            from datetime import datetime, timezone
+            now = datetime.now(timezone.utc)
+            
             async with async_session() as session:
-                # Find expired premium users
                 result = await session.execute(
                     text("""
                         SELECT telegram_id FROM users 
@@ -2589,7 +2747,6 @@ async def check_subscriptions():
                 expired_users = result.mappings().all()
                 
                 if expired_users:
-                    # Disable premium for expired users
                     await session.execute(
                         text("""
                             UPDATE users 
@@ -2601,24 +2758,21 @@ async def check_subscriptions():
                     )
                     await session.commit()
                     
-                    # Notify users
                     for user in expired_users:
                         try:
                             await bot.send_message(
                                 user['telegram_id'],
-                                "⚠️ Ваша премиум-подписка истекла. "
-                                "Вы можете продлить её в магазине."
+                                "⚠️ Ваша премиум-подписка истекла."
                             )
                         except Exception as e:
-                            logger.error(f"Could not notify user {user['telegram_id']}: {e}")
+                            logger.error(f"Ошибка уведомления пользователя: {e}")
                 
-                logger.info(f"Checked subscriptions at {now}, expired: {len(expired_users)}")
+                logger.info(f"Проверка подписок выполнена. Истекших: {len(expired_users)}")
                 
         except Exception as e:
-            logger.error(f"Error in check_subscriptions: {e}")
+            logger.error(f"Ошибка проверки подписок: {e}")
         
-        # Run once per hour
-        await asyncio.sleep(60 * 60)
+        await asyncio.sleep(3600)  # Каждый час
 
 async def check_user_ban(user_id: int) -> bool:
     """Проверяет, забанен ли пользователь"""
